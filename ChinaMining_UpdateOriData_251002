@@ -1,4 +1,4 @@
-// =================================================================================== 
+// =================================================================================== 
 // 矿区生命周期分类与开采强度批量分析任务脚本（加固版 V5.5 | Server-safe 分支修复 | 起/停年份按用户“插入段”逐条复刻+诊断）
 // 修复要点：
 // 1) 统一用服务器端字符串比较切换 Sentinel-2 / Landsat 分支（不再使用 ===）
@@ -14,17 +14,17 @@
 var mineAreas = ee.FeatureCollection(table);
 
 var CONFIG = {
-  startYear: 1986,
-  endYear: 2024,
-  growingSeasonStart: 4,
-  growingSeasonEnd: 10,
-  latestReferenceYear: 2023,
-  outputAsset: 'users/Loki_ChinaMiningResearch/ChinaMiningPolygen_lifecycle_metrics'
+  startYear: 1986,
+  endYear: 2024,
+  growingSeasonStart: 4,
+  growingSeasonEnd: 10,
+  latestReferenceYear: 2023,
+  outputAsset: 'users/Loki_ChinaMiningResearch/ChinaMiningPolygen_lifecycle_metrics'
 };
 
-var TEST_MODE = true;            // 测试模式：仅抽样若干要素
-var TEST_SAMPLE_SIZE = 5;        // 抽样数量
-var DEBUG = true;                // 输出调试属性（server-safe），建议先保持 true
+var TEST_MODE = true;            // 测试模式：仅抽样若干要素
+var TEST_SAMPLE_SIZE = 5;        // 抽样数量
+var DEBUG = true;                // 输出调试属性（server-safe），建议先保持 true
 
 var analysisYears = ee.List.sequence(CONFIG.startYear, CONFIG.endYear);
 
@@ -34,266 +34,280 @@ var s2Collection = s2Raw.select(['B4', 'B8', 'SCL']);
 
 // Landsat L2（用于起始端点 & 年最大 NDVI）
 var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
-  .select(['SR_B4', 'SR_B5', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
+  .select(['SR_B4', 'SR_B5', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
 var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
-  .select(['SR_B3', 'SR_B4', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
+  .select(['SR_B3', 'SR_B4', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
 var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
-  .select(['SR_B3', 'SR_B4', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
+  .select(['SR_B3', 'SR_B4', 'QA_PIXEL'], ['RED', 'NIR', 'QA_PIXEL']);
 
 var landsatAll = ee.ImageCollection(l5.merge(l7).merge(l8));
 
 // ----------------------------- 通用布尔 & 字典工具 -----------------------------
-var toBool   = function (v) { return ee.Algorithms.If(v, true, false); };
-var boolAnd  = function (l, r) { return toBool(ee.Algorithms.If(toBool(l), toBool(r), false)); };
-var boolOr   = function (l, r) { return toBool(ee.Algorithms.If(toBool(l), true, toBool(r))); };
-var boolNot  = function (v) { return toBool(ee.Algorithms.If(toBool(v), false, true)); };
-var boolAll  = function (conds) {
-  conds = ee.List(conds);
-  return toBool(conds.iterate(function (c, acc) { acc = toBool(acc); return ee.Algorithms.If(acc, toBool(c), false); }, true));
+var toBool   = function (v) { return ee.Algorithms.If(v, true, false); };
+var boolAnd  = function (l, r) { return toBool(ee.Algorithms.If(toBool(l), toBool(r), false)); };
+var boolOr   = function (l, r) { return toBool(ee.Algorithms.If(toBool(l), true, toBool(r))); };
+var boolNot  = function (v) { return toBool(ee.Algorithms.If(toBool(v), false, true)); };
+var boolAll  = function (conds) {
+  conds = ee.List(conds);
+  return toBool(conds.iterate(function (c, acc) { acc = toBool(acc); return ee.Algorithms.If(acc, toBool(c), false); }, true));
 };
 
 var asDict = function (x) {
-  var isNull = ee.Algorithms.IsEqual(x, null);
-  var isDict = ee.Algorithms.If(isNull, false, ee.Algorithms.ObjectType(x).compareTo('Dictionary').eq(0));
-  return ee.Dictionary(ee.Algorithms.If(isDict, x, ee.Dictionary({})));
+  var isNull = ee.Algorithms.IsEqual(x, null);
+  var isDict = ee.Algorithms.If(isNull, false, ee.Algorithms.ObjectType(x).compareTo('Dictionary').eq(0));
+  return ee.Dictionary(ee.Algorithms.If(isDict, x, ee.Dictionary({})));
 };
-var dictGet       = function (d, k, defV) { d = asDict(d); return ee.Algorithms.If(d.contains(k), d.get(k), defV); };
+var dictGet       = function (d, k, defV) { d = asDict(d); return ee.Algorithms.If(d.contains(k), d.get(k), defV); };
 var dictGetNumber = function (d, k, defV) { return ee.Number(dictGet(d, k, defV)); };
-var dictGetBool   = function (d, k, defV) { return toBool(dictGet(d, k, defV)); };
+var dictGetBool   = function (d, k, defV) { return toBool(dictGet(d, k, defV)); };
 
 // 判断传感器（服务器端）
 var isS2 = function (sat) { return ee.String(sat).compareTo('Sentinel-2').eq(0); };
 
 // ----------------------------- 基础函数 -----------------------------
 var getPlatformByYear = function (year) {
-  year = ee.Number(year);
-  return ee.String(ee.Algorithms.If(year.lte(2011), 'L5', ee.Algorithms.If(year.eq(2012), 'L7', 'L8')));
+  year = ee.Number(year);
+  return ee.String(ee.Algorithms.If(year.lte(2011), 'L5', ee.Algorithms.If(year.eq(2012), 'L7', 'L8')));
 };
 var getCollectionByPlatform = function (platform) {
-  platform = ee.String(platform);
-  return ee.ImageCollection(ee.Algorithms.If(platform.compareTo('L5').eq(0), l5,
-                                ee.Algorithms.If(platform.compareTo('L7').eq(0), l7, l8)));
+  platform = ee.String(platform);
+  return ee.ImageCollection(ee.Algorithms.If(platform.compareTo('L5').eq(0), l5,
+                                ee.Algorithms.If(platform.compareTo('L7').eq(0), l7, l8)));
 };
 
 // 量纲缩放
 var scaleSentinel2 = function (img) {
-  img = ee.Image(img);
-  return ee.Image.cat([
-    img.select('B4').multiply(0.0001).rename('RED'),
-    img.select('B8').multiply(0.0001).rename('NIR')
-  ]);
+  img = ee.Image(img);
+  return ee.Image.cat([
+    img.select('B4').multiply(0.0001).rename('RED'),
+    img.select('B8').multiply(0.0001).rename('NIR')
+  ]);
 };
 var scaleLandsat = function (img) {
-  img = ee.Image(img);
-  return ee.Image.cat([
-    img.select('RED').multiply(0.0000275).add(-0.2).rename('RED'),
-    img.select('NIR').multiply(0.0000275).add(-0.2).rename('NIR')
-  ]);
+  img = ee.Image(img);
+  return ee.Image.cat([
+    img.select('RED').multiply(0.0000275).add(-0.2).rename('RED'),
+    img.select('NIR').multiply(0.0000275).add(-0.2).rename('NIR')
+  ]);
 };
 var scaleOpticalBands = function (img, satellite) {
-  var cond = isS2(satellite);
-  return ee.Image(ee.Algorithms.If(cond, scaleSentinel2(img), scaleLandsat(img)));
+  var cond = isS2(satellite);
+  return ee.Image(ee.Algorithms.If(cond, scaleSentinel2(img), scaleLandsat(img)));
 };
 
 // 云掩膜 + 标准输出通道
 var universalCloudMask = function (image, satellite) {
-  image = ee.Image(image);
-  var cond = isS2(satellite);
-  return ee.Image(ee.Algorithms.If(
-    cond,
-    (function () { // Sentinel-2
-      var keep = [2, 4, 5, 6, 7, 11];
-      var mask = image.select('SCL').remap(keep, ee.List.repeat(1, keep.length), 0);
-      return image.updateMask(mask).select(['B4', 'B8']);
-    })(),
-    (function () { // Landsat
-      var qa = image.select('QA_PIXEL');
-      var cloudShadow = 1 << 4, cloud = 1 << 3, dilated = 1 << 1, cirrus = 1 << 2, snow = 1 << 5;
-      var mask2 = qa.bitwiseAnd(cloudShadow).eq(0)
-        .and(qa.bitwiseAnd(cloud).eq(0))
-        .and(qa.bitwiseAnd(dilated).eq(0))
-        .and(qa.bitwiseAnd(cirrus).eq(0))
-        .and(qa.bitwiseAnd(snow).eq(0));
-      return image.updateMask(mask2).select(['RED', 'NIR']);
-    })()
-  ));
+  image = ee.Image(image);
+  var cond = isS2(satellite);
+  return ee.Image(ee.Algorithms.If(
+    cond,
+    (function () { // Sentinel-2
+      var keep = [2, 4, 5, 6, 7, 11];
+      var mask = image.select('SCL').remap(keep, ee.List.repeat(1, keep.length), 0);
+      return image.updateMask(mask).select(['B4', 'B8']);
+    })(),
+    (function () { // Landsat
+      var qa = image.select('QA_PIXEL');
+      var cloudShadow = 1 << 4, cloud = 1 << 3, dilated = 1 << 1, cirrus = 1 << 2, snow = 1 << 5;
+      var mask2 = qa.bitwiseAnd(cloudShadow).eq(0)
+        .and(qa.bitwiseAnd(cloud).eq(0))
+        .and(qa.bitwiseAnd(dilated).eq(0))
+        .and(qa.bitwiseAnd(cirrus).eq(0))
+        .and(qa.bitwiseAnd(snow).eq(0));
+      return image.updateMask(mask2).select(['RED', 'NIR']);
+    })()
+  ));
 };
 
 // 条带修复（L7/2012）
 var repairLandsatStripes = function (ndviImage, year) {
-  var ndvi = ee.Image(ndviImage);
-  var needsWide = ee.Number(year).eq(2012);
-  var kernel = ee.Kernel.square({ radius: ee.Number(ee.Algorithms.If(needsWide, 2, 1)), units: 'pixels', normalize: true });
-  var filled = ndvi.focalMean({ kernel: kernel, iterations: 1 });
-  var mask = ee.Image(ee.Algorithms.If(needsWide, ndvi.mask().focalMax({ kernel: kernel, iterations: 1 }), ndvi.mask()));
-  return ndvi.unmask(filled).updateMask(mask);
+  var ndvi = ee.Image(ndviImage);
+  var needsWide = ee.Number(year).eq(2012);
+  var kernel = ee.Kernel.square({ radius: ee.Number(ee.Algorithms.If(needsWide, 2, 1)), units: 'pixels', normalize: true });
+  var filled = ndvi.focalMean({ kernel: kernel, iterations: 1 });
+  var mask = ee.Image(ee.Algorithms.If(needsWide, ndvi.mask().focalMax({ kernel: kernel, iterations: 1 }), ndvi.mask()));
+  return ndvi.unmask(filled).updateMask(mask);
 };
 
 // 年度 NDVI（Landsat）
 var buildAnnualLandsatNdvi = function () {
-  var annualImages = analysisYears.map(function (year) {
-    year = ee.Number(year);
-    var start = ee.Date.fromYMD(year, 1, 1);
-    var end = start.advance(1, 'year');
+  var annualImages = analysisYears.map(function (year) {
+    year = ee.Number(year);
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = start.advance(1, 'year');
 
-    var platform = getPlatformByYear(year);
-    var collection = getCollectionByPlatform(platform).filterDate(start, end);
+    var platform = getPlatformByYear(year);
+    var collection = getCollectionByPlatform(platform).filterDate(start, end);
 
-    collection = ee.ImageCollection(ee.Algorithms.If(
-      boolAll([year.gte(2000), year.lte(2003)]),
-      collection.filter(ee.Filter.calendarRange(CONFIG.growingSeasonStart, CONFIG.growingSeasonEnd, 'month')),
-      collection
-    ));
+    collection = ee.ImageCollection(ee.Algorithms.If(
+      boolAll([year.gte(2000), year.lte(2003)]),
+      collection.filter(ee.Filter.calendarRange(CONFIG.growingSeasonStart, CONFIG.growingSeasonEnd, 'month')),
+      collection
+    ));
 
-    collection = collection.map(function (img) {
-      var masked = universalCloudMask(img, 'Landsat');
-      var scaled = scaleOpticalBands(masked, 'Landsat');
-      var ndvi = scaled.normalizedDifference(['NIR', 'RED']).rename('NDVI');
-      var cleaned = repairLandsatStripes(ndvi, year);
-      return cleaned.copyProperties(img, ['system:time_start']);
-    });
+    collection = collection.map(function (img) {
+      var masked = universalCloudMask(img, 'Landsat');
+      var scaled = scaleOpticalBands(masked, 'Landsat');
+      var ndvi = scaled.normalizedDifference(['NIR', 'RED']).rename('NDVI');
+      var cleaned = repairLandsatStripes(ndvi, year);
+      return cleaned.copyProperties(img, ['system:time_start']);
+    });
 
-    var composite = ee.Image(ee.Algorithms.If(
-      collection.size().gt(0),
-      ee.Image(collection.qualityMosaic('NDVI')).select('NDVI'),
-      ee.Image.constant(0).rename('NDVI').updateMask(ee.Image.constant(0))
-    ));
+    var composite = ee.Image(ee.Algorithms.If(
+      collection.size().gt(0),
+      ee.Image(collection.qualityMosaic('NDVI')).select('NDVI'),
+      ee.Image.constant(0).rename('NDVI').updateMask(ee.Image.constant(0))
+    ));
 
-    var source = ee.String(ee.Algorithms.If(
-      platform.compareTo('L5').eq(0), 'Landsat 5 (SR)',
-      ee.Algorithms.If(platform.compareTo('L7').eq(0), 'Landsat 7 (SR, gap-filled)', 'Landsat 8 (SR)')
-    ));
+    var source = ee.String(ee.Algorithms.If(
+      platform.compareTo('L5').eq(0), 'Landsat 5 (SR)',
+      ee.Algorithms.If(platform.compareTo('L7').eq(0), 'Landsat 7 (SR, gap-filled)', 'Landsat 8 (SR)')
+    ));
 
-    return composite.set({ year: year, 'system:time_start': start.millis(), 'system:time_end': end.millis(), source: source });
-  });
-  return ee.ImageCollection(annualImages);
+    return composite.set({ year: year, 'system:time_start': start.millis(), 'system:time_end': end.millis(), source: source });
+  });
+  return ee.ImageCollection(annualImages);
 };
 var landsatAnnualNdvi = buildAnnualLandsatNdvi();
 
 // 稳健复合（±2 年优先，退 ±3 年；内部做云掩膜与标准通道输出）
 var getComposite = function (year, satellite, collection, aoi) {
-  year = ee.Number(year);
-  var start2 = ee.Date.fromYMD(year.subtract(2), 1, 1), end2 = ee.Date.fromYMD(year.add(2), 12, 31);
-  var start3 = ee.Date.fromYMD(year.subtract(3), 1, 1), end3 = ee.Date.fromYMD(year.add(3), 12, 31);
+  year = ee.Number(year);
+  var start2 = ee.Date.fromYMD(year.subtract(2), 1, 1), end2 = ee.Date.fromYMD(year.add(2), 12, 31);
+  var start3 = ee.Date.fromYMD(year.subtract(3), 1, 1), end3 = ee.Date.fromYMD(year.add(3), 12, 31);
 
-  var base = ee.ImageCollection(collection).filterBounds(aoi);
-  var c2 = base.filterDate(start2, end2);
-  var c3 = base.filterDate(start3, end3);
+  var base = ee.ImageCollection(collection).filterBounds(aoi);
+  var c2 = base.filterDate(start2, end2);
+  var c3 = base.filterDate(start3, end3);
 
-  var masked2 = c2.map(function (img) { return universalCloudMask(img, satellite); });
-  var masked3 = c3.map(function (img) { return universalCloudMask(img, satellite); });
+  var masked2 = c2.map(function (img) { return universalCloudMask(img, satellite); });
+  var masked3 = c3.map(function (img) { return universalCloudMask(img, satellite); });
 
-  var empty = ee.Image(ee.Algorithms.If(
-    isS2(satellite),
-    ee.Image.constant([0, 0]).rename(['B4', 'B8']),
-    ee.Image.constant([0, 0]).rename(['RED', 'NIR'])
-  ));
+  var empty = ee.Image(ee.Algorithms.If(
+    isS2(satellite),
+    ee.Image.constant([0, 0]).rename(['B4', 'B8']),
+    ee.Image.constant([0, 0]).rename(['RED', 'NIR'])
+  ));
 
-  var chosen = ee.Image(ee.Algorithms.If(
-    masked2.size().gt(2), masked2.mean(),
-    ee.Algorithms.If(masked3.size().gt(2), masked3.mean(), empty)
-  ));
+  var chosen = ee.Image(ee.Algorithms.If(
+    masked2.size().gt(2), masked2.mean(),
+    ee.Algorithms.If(masked3.size().gt(2), masked3.mean(), empty)
+  ));
 
-  return chosen.clip(aoi);
+  return chosen.clip(aoi);
 };
 
 // BNNC / BNEC
 var calcBNNC_BNEC = function (image, satellite, geom, ring) {
-  var scaled = scaleOpticalBands(image, satellite);
-  var RED = scaled.select('RED');
-  var NIR = scaled.select('NIR');
+  var scaled = scaleOpticalBands(image, satellite);
+  var RED = scaled.select('RED');
+  var NIR = scaled.select('NIR');
 
-  var ndvi = NIR.subtract(RED).divide(NIR.add(RED).add(1e-6)).rename('NDVI');
+  var ndvi = NIR.subtract(RED).divide(NIR.add(RED).add(1e-6)).rename('NDVI');
 
-  var glcmScale = ee.Number(ee.Algorithms.If(isS2(satellite), 20, 30));
-  var nirForGlcm = ee.Image(ee.Algorithms.If(
-    isS2(satellite),
-    NIR.reproject({ crs: NIR.projection(), scale: glcmScale }),
-    NIR
-  ));
+  var glcmScale = ee.Number(ee.Algorithms.If(isS2(satellite), 20, 30));
+  var nirForGlcm = ee.Image(ee.Algorithms.If(
+    isS2(satellite),
+    NIR.reproject({ crs: NIR.projection(), scale: glcmScale }),
+    NIR
+  ));
 
-  var nirByte = nirForGlcm.clamp(0, 1).multiply(255).toByte();
-  var entropyBand = 'NIR_ent';
-  var entropy = nirByte.glcmTexture({ size: 2, average: true }).select(entropyBand);
+  var nirByte = nirForGlcm.clamp(0, 1).multiply(255).toByte();
+  var entropyBand = 'NIR_ent';
+  var entropy = nirByte.glcmTexture({ size: 2, average: true }).select(entropyBand);
 
-  var metricsImage = ee.Image.cat([ndvi, entropy]);
+  var metricsImage = ee.Image.cat([ndvi, entropy]);
 
-  var reducer = ee.Reducer.mean().combine({ reducer2: ee.Reducer.count(), sharedInputs: true });
+  var reducer = ee.Reducer.mean().combine({ reducer2: ee.Reducer.count(), sharedInputs: true });
 
-  var computeStats = function (area) {
-    area = ee.Geometry(area);
-    var statsRaw = metricsImage.reduceRegion({
-      geometry: area, reducer: reducer, scale: glcmScale,
-      maxPixels: 5e8, tileScale: 4, bestEffort: true
-    });
-    var stats = asDict(statsRaw);
-    var ndviCount = dictGetNumber(stats, 'NDVI_count', 0);
-    var entropyCount = dictGetNumber(stats, entropyBand + '_count', 0);
-    return ee.Dictionary({
-      ndvi: dictGet(stats, 'NDVI_mean', 0),
-      entropy: dictGet(stats, entropyBand + '_mean', 0),
-      ndviValid: ndviCount.gt(0),
-      entValid: entropyCount.gt(0)
-    });
-  };
+  var computeStats = function (area) {
+    area = ee.Geometry(area);
+    var statsRaw = metricsImage.reduceRegion({
+      geometry: area, reducer: reducer, scale: glcmScale,
+      maxPixels: 5e8, tileScale: 4, bestEffort: true
+    });
+    var stats = asDict(statsRaw);
+    var ndviCount = dictGetNumber(stats, 'NDVI_count', 0);
+    var entropyCount = dictGetNumber(stats, entropyBand + '_count', 0);
+    return ee.Dictionary({
+      ndvi: dictGet(stats, 'NDVI_mean', 0),
+      entropy: dictGet(stats, entropyBand + '_mean', 0),
+      ndviValid: ndviCount.gt(0),
+      entValid: entropyCount.gt(0)
+    });
+  };
 
-  var inner = computeStats(geom);
-  var outer = computeStats(ring);
+  var inner = computeStats(geom);
+  var outer = computeStats(ring);
 
-  var ndvi_in  = ee.Number(inner.get('ndvi'));
-  var ndvi_out = ee.Number(outer.get('ndvi'));
-  var ent_in   = ee.Number(inner.get('entropy'));
-  var ent_out  = ee.Number(outer.get('entropy'));
+  var ndvi_in  = ee.Number(inner.get('ndvi'));
+  var ndvi_out = ee.Number(outer.get('ndvi'));
+  var ent_in   = ee.Number(inner.get('entropy'));
+  var ent_out  = ee.Number(outer.get('entropy'));
 
-  var ndviValid = boolAll([inner.get('ndviValid'), outer.get('ndviValid'), ndvi_out.abs().gt(1e-12)]);
-  var entValid  = boolAll([inner.get('entValid'),  outer.get('entValid'),  ent_out.abs().gt(1e-12)]);
+  var ndviValid = boolAll([inner.get('ndviValid'), outer.get('ndviValid'), ndvi_out.abs().gt(1e-12)]);
+  var entValid  = boolAll([inner.get('entValid'),  outer.get('entValid'),  ent_out.abs().gt(1e-12)]);
 
-  var bnncValue = ee.Number(ndvi_out.subtract(ndvi_in).divide(ndvi_out));
-  var bnecValue = ee.Number(ent_out.subtract(ent_in).divide(ent_out));
+  var bnncValue = ee.Number(ndvi_out.subtract(ndvi_in).divide(ndvi_out));
+  var bnecValue = ee.Number(ent_out.subtract(ent_in).divide(ent_out));
 
-  return ee.Dictionary({
-    bnnc_in: ndvi_in,  bnnc_out: ndvi_out,
-    bnnc: ee.Algorithms.If(ndviValid, bnncValue, null), bnnc_valid: ndviValid,
-    bnec_in: ent_in,   bnec_out: ent_out,
-    bnec: ee.Algorithms.If(entValid, bnecValue, null),  bnec_valid: entValid
-  });
+  return ee.Dictionary({
+    bnnc_in: ndvi_in,  bnnc_out: ndvi_out,
+    bnnc: ee.Algorithms.If(ndviValid, bnncValue, null), bnnc_valid: ndviValid,
+    bnec_in: ent_in,   bnec_out: ent_out,
+    bnec: ee.Algorithms.If(entValid, bnecValue, null),  bnec_valid: entValid
+  });
 };
 
 // ----------------------------- 列表与统计工具 -----------------------------
 var listLength = function (list) { return ee.Number(ee.List(list).length()); };
 var safeReduceDict = function (list, reducer) { list = ee.List(list); var size = ee.Number(list.length()); var out = ee.Algorithms.If(size.eq(0), ee.Dictionary({}), list.reduce(reducer)); return asDict(out); };
-var listMean   = function (list) { list = ee.List(list); var size = listLength(list); var result = safeReduceDict(list, ee.Reducer.mean()); return ee.Number(ee.Algorithms.If(size.eq(0), 0, dictGetNumber(result, 'mean', 0))); };
+var listMean   = function (list) { list = ee.List(list); var size = listLength(list); var result = safeReduceDict(list, ee.Reducer.mean()); return ee.Number(ee.Algorithms.If(size.eq(0), 0, dictGetNumber(result, 'mean', 0))); };
 var listStdDev = function (list) { list = ee.List(list); var size = listLength(list); var result = safeReduceDict(list, ee.Reducer.stdDev()); return ee.Number(ee.Algorithms.If(size.lt(2), 0, dictGetNumber(result, 'stdDev', 0))); };
+// ===== [新增] 总体标准差函数 =====
+var listPopStdDev = function (list) {
+  list = ee.List(list);
+  var n = listLength(list);
+  return ee.Number(ee.Algorithms.If(n.lt(1), 0, (function() {
+    var mean = listMean(list);
+    var diffSq = list.map(function(val) {
+      var diff = ee.Number(val).subtract(mean);
+      return diff.multiply(diff);
+    });
+    var variance = listMean(diffSq); // This is population variance
+    return variance.sqrt();
+  })()));
+};
 var listMedian = function (list) {
-  list = ee.List(list); var size = listLength(list);
-  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
-    var sorted = list.sort(); var mid = size.divide(2); var midFloor = mid.floor(); var isOdd = size.mod(2).eq(1);
-    return ee.Number(ee.Algorithms.If(isOdd, sorted.get(midFloor),
-      ee.Number(sorted.get(midFloor.subtract(1))).add(ee.Number(sorted.get(midFloor))).divide(2)));
-  })()));
+  list = ee.List(list); var size = listLength(list);
+  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
+    var sorted = list.sort(); var mid = size.divide(2); var midFloor = mid.floor(); var isOdd = size.mod(2).eq(1);
+    return ee.Number(ee.Algorithms.If(isOdd, sorted.get(midFloor),
+      ee.Number(sorted.get(midFloor.subtract(1))).add(ee.Number(sorted.get(midFloor))).divide(2)));
+  })()));
 };
 var listQuantile = function (list, q) {
-  list = ee.List(list); var size = listLength(list);
-  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
-    var percent = ee.Number(q).multiply(100); var reducer = ee.Reducer.percentile([percent]); var key = ee.String('p').cat(percent.format('%.0f'));
-    var result = safeReduceDict(list, reducer); return dictGetNumber(result, key, 0);
-  })()));
+  list = ee.List(list); var size = listLength(list);
+  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
+    var percent = ee.Number(q).multiply(100); var reducer = ee.Reducer.percentile([percent]); var key = ee.String('p').cat(percent.format('%.0f'));
+    var result = safeReduceDict(list, reducer); return dictGetNumber(result, key, 0);
+  })()));
 };
 var listRange = function (list) {
-  list = ee.List(list); var size = listLength(list);
-  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
-    var mm = safeReduceDict(list, ee.Reducer.minMax()); return dictGetNumber(mm, 'max', 0).subtract(dictGetNumber(mm, 'min', 0));
-  })()));
+  list = ee.List(list); var size = listLength(list);
+  return ee.Number(ee.Algorithms.If(size.eq(0), 0, (function () {
+    var mm = safeReduceDict(list, ee.Reducer.minMax()); return dictGetNumber(mm, 'max', 0).subtract(dictGetNumber(mm, 'min', 0));
+  })()));
 };
 var trimmedMean = function (list, trimN) { list = ee.List(list); var size = listLength(list); var maxTrim = size.subtract(1).divide(2).floor(); var trim = ee.Number(trimN).max(0).min(maxTrim); var sorted = list.sort(); return listMean(sorted.slice(trim, size.subtract(trim))); };
 var extractValues = function (pts) { return ee.List(pts).map(function (p) { return ee.Dictionary(p).get('ndvi'); }); };
-var extractYears  = function (pts) { return ee.List(pts).map(function (p) { return ee.Dictionary(p).get('year'); }); };
+var extractYears  = function (pts) { return ee.List(pts).map(function (p) { return ee.Dictionary(p).get('year'); }); };
 var computeSlopeFromPairs = function (years, values) {
-  years = ee.List(years); values = ee.List(values); var n = listLength(years);
-  return ee.Algorithms.If(n.lt(2), 0, (function () {
-    var fc = ee.FeatureCollection(ee.List.sequence(0, n.subtract(1)).map(function (i) { i = ee.Number(i); return ee.Feature(null, { x: ee.Number(years.get(i)), y: ee.Number(values.get(i)) }); }));
-    var fit = asDict(fc.reduceColumns(ee.Reducer.linearFit(), ['x', 'y'])); return dictGetNumber(fit, 'scale', 0);
-  })());
+  years = ee.List(years); values = ee.List(values); var n = listLength(years);
+  return ee.Algorithms.If(n.lt(2), 0, (function () {
+    var fc = ee.FeatureCollection(ee.List.sequence(0, n.subtract(1)).map(function (i) { i = ee.Number(i); return ee.Feature(null, { x: ee.Number(years.get(i)), y: ee.Number(values.get(i)) }); }));
+    var fit = asDict(fc.reduceColumns(ee.Reducer.linearFit(), ['x', 'y'])); return dictGetNumber(fit, 'scale', 0);
+  })());
 };
 var computeSlopeSeries = function (points) { points = ee.List(points); return ee.Number(computeSlopeFromPairs(extractYears(points), extractValues(points))); };
 
@@ -308,64 +322,57 @@ var sliceWindow = function (series, idx, preLen, postLen) {
 };
 
 var sliceLong = function (series, startIdx, len) {
-  series = ee.List(series); var size = listLength(series); var start = ee.Number(startIdx); var end = start.add(len).min(size);
-  return series.slice(start, end);
+  series = ee.List(series); var size = listLength(series); var start = ee.Number(startIdx); var end = start.add(len).min(size);
+  return series.slice(start, end);
 };
 var tailMean = function (values, tailLen) {
-  values = ee.List(values); var size = listLength(values); var start = size.subtract(tailLen).max(0);
-  return listMean(values.slice(start, size));
+  values = ee.List(values); var size = listLength(values); var start = size.subtract(tailLen).max(0);
+  return listMean(values.slice(start, size));
 };
 var stableFlat = function (points, slopeMax, cvMax, rangeMax) {
-  points = ee.List(points); var length = listLength(points);
-  return ee.Algorithms.If(length.lt(3), false, (function () {
-    var nd = extractValues(points), mean = listMean(nd), sd = listStdDev(nd), rangeVal = listRange(nd);
-    var denom = ee.Number(mean).abs().max(1e-6); var cv = ee.Number(sd).divide(denom); var slope = ee.Number(computeSlopeSeries(points));
-    return boolAll([cv.lte(cvMax), rangeVal.lte(rangeMax), slope.abs().lte(slopeMax)]);
-  }));
+  points = ee.List(points); var length = listLength(points);
+  return ee.Algorithms.If(length.lt(3), false, (function () {
+    var nd = extractValues(points), mean = listMean(nd), sd = listStdDev(nd), rangeVal = listRange(nd);
+    var denom = ee.Number(mean).abs().max(1e-6); var cv = ee.Number(sd).divide(denom); var slope = ee.Number(computeSlopeSeries(points));
+    return boolAll([cv.lte(cvMax), rangeVal.lte(rangeMax), slope.abs().lte(slopeMax)]);
+  }));
 };
 var removeOutliers = function (series) {
-  series = ee.List(series); var length = listLength(series); var values = extractValues(series);
-  var globalMedian = listMedian(values);
-  var deviations = values.map(function (val) { return ee.Number(val).subtract(globalMedian).abs(); });
-  var mad = listMedian(deviations);
-  var threshold = ee.Number(ee.Algorithms.If(length.gt(0), ee.Number(mad).multiply(3), 0)).max(0.12);
-  return ee.List(ee.Algorithms.If(length.lte(2), series,
-    ee.List.sequence(0, length.subtract(1)).iterate(function (idx, acc) {
-      acc = ee.List(acc); idx = ee.Number(idx);
-      var item = ee.Dictionary(series.get(idx)); var value = ee.Number(item.get('ndvi'));
-      var isOutlier = value.subtract(globalMedian).abs().gt(threshold);
-      var left = ee.List(ee.Algorithms.If(idx.gt(0), ee.List([values.get(idx.subtract(1))]), ee.List([])));
-      var right = ee.List(ee.Algorithms.If(idx.lt(length.subtract(1)), ee.List([values.get(idx.add(1))]), ee.List([])));
-      var neighbors = left.cat(right);
-      var neighborMean = ee.Number(ee.Algorithms.If(listLength(neighbors).gt(0), listMean(neighbors), globalMedian));
-      var replacement = neighborMean.multiply(0.7).add(ee.Number(globalMedian).multiply(0.3));
-      var newValue = ee.Algorithms.If(isOutlier, replacement, value);
-      return acc.add(item.set('ndvi', newValue));
-    }, ee.List([]))
-  ));
+  series = ee.List(series); var length = listLength(series); var values = extractValues(series);
+  var globalMedian = listMedian(values);
+  var deviations = values.map(function (val) { return ee.Number(val).subtract(globalMedian).abs(); });
+  var mad = listMedian(deviations);
+  var threshold = ee.Number(ee.Algorithms.If(length.gt(0), ee.Number(mad).multiply(3), 0)).max(0.12);
+  return ee.List(ee.Algorithms.If(length.lte(2), series,
+    ee.List.sequence(0, length.subtract(1)).iterate(function (idx, acc) {
+      acc = ee.List(acc); idx = ee.Number(idx);
+      var item = ee.Dictionary(series.get(idx)); var value = ee.Number(item.get('ndvi'));
+      var isOutlier = value.subtract(globalMedian).abs().gt(threshold);
+      var left = ee.List(ee.Algorithms.If(idx.gt(0), ee.List([values.get(idx.subtract(1))]), ee.List([])));
+      var right = ee.List(ee.Algorithms.If(idx.lt(length.subtract(1)), ee.List([values.get(idx.add(1))]), ee.List([])));
+      var neighbors = left.cat(right);
+      var neighborMean = ee.Number(ee.Algorithms.If(listLength(neighbors).gt(0), listMean(neighbors), globalMedian));
+      var replacement = neighborMean.multiply(0.7).add(ee.Number(globalMedian).multiply(0.3));
+      var newValue = ee.Algorithms.If(isOutlier, replacement, value);
+      return acc.add(item.set('ndvi', newValue));
+    }, ee.List([]))
+  ));
 };
-// ===== [已修复] 平滑函数 =====
 var smoothSeries = function (series, window) {
-  series = ee.List(series); // 确保输入是 ee.List
+  series = ee.List(series);
   var size = listLength(series);
   var w = ee.Number(window);
   var wClamped = ee.Number(ee.Algorithms.If(size.lt(2), 1, w.max(2).min(size)));
   var half = wClamped.divide(2).floor();
-  
   return ee.List(ee.Algorithms.If(size.eq(0), series,
     ee.List.sequence(0, size.subtract(1)).map(function (idx) {
       idx = ee.Number(idx);
       var start = idx.subtract(half).max(0);
-      var end = idx.add(half).add(1).min(size); // slice 的 end 是不包含的
-      
-      // 修复：确保从正确的 series (输入) 中切片
+      var end = idx.add(half).add(1).min(size);
       var subset = series.slice(start, end);
       var values = extractValues(subset);
       var mean = listMean(values);
-      
-      // 修复：从正确的 series (输入) 中获取原始字典
       var originalDict = ee.Dictionary(series.get(idx));
-      
       return originalDict.set('ndvi', mean);
     })
   ));
@@ -373,511 +380,512 @@ var smoothSeries = function (series, window) {
 
 // ----------------------------- NDVI 序列与生命周期分析 -----------------------------
 var buildNdviSeries = function (feature) {
-  feature = ee.Feature(feature);
-  var geom = feature.geometry();
-  var fc = ee.FeatureCollection(landsatAnnualNdvi.map(function (img) {
-    img = ee.Image(img);
-    var year = ee.Number(img.get('year'));
-    var meanNdvi = img.reduceRegion({ reducer: ee.Reducer.mean(), geometry: geom, scale: 30, maxPixels: 1e9, bestEffort: true }).get('NDVI');
-    return ee.Feature(null, { year: year, ndvi: meanNdvi, source: img.get('source') });
-  })).filter(ee.Filter.notNull(['ndvi'])).sort('year');
+  feature = ee.Feature(feature);
+  var geom = feature.geometry();
+  var fc = ee.FeatureCollection(landsatAnnualNdvi.map(function (img) {
+    img = ee.Image(img);
+    var year = ee.Number(img.get('year'));
+    var meanNdvi = img.reduceRegion({ reducer: ee.Reducer.mean(), geometry: geom, scale: 30, maxPixels: 1e9, bestEffort: true }).get('NDVI');
+    return ee.Feature(null, { year: year, ndvi: meanNdvi, source: img.get('source') });
+  })).filter(ee.Filter.notNull(['ndvi'])).sort('year');
 
-  var series = fc.toList(fc.size()).map(function (f) {
-    f = ee.Feature(f);
-    return ee.Dictionary({ year: f.get('year'), ndvi: f.get('ndvi'), source: f.get('source') });
-  });
+  var series = fc.toList(fc.size()).map(function (f) {
+    f = ee.Feature(f);
+    return ee.Dictionary({ year: f.get('year'), ndvi: f.get('ndvi'), source: f.get('source') });
+  });
 
-  return ee.Dictionary({
-    series: series,
-    size: fc.size(),
-    firstYear: ee.Algorithms.If(fc.size().gt(0), fc.first().get('year'), null),
-    lastYear: ee.Algorithms.If(fc.size().gt(0), fc.sort('year', false).first().get('year'), null)
-  });
+  return ee.Dictionary({
+    series: series,
+    size: fc.size(),
+    firstYear: ee.Algorithms.If(fc.size().gt(0), fc.first().get('year'), null),
+    lastYear: ee.Algorithms.If(fc.size().gt(0), fc.sort('year', false).first().get('year'), null)
+  });
 };
 
 var findIndex = function (indices, predicate) {
-  indices = ee.List(indices);
-  return ee.Dictionary(indices.iterate(function (idx, state) {
-    state = asDict(state);
-    var found = toBool(state.get('found'));
-    return ee.Dictionary(ee.Algorithms.If(found, state, ee.Algorithms.If(predicate(idx), ee.Dictionary({ found: true, index: idx }), state)));
-  }, ee.Dictionary({ found: false })));
+  indices = ee.List(indices);
+  return ee.Dictionary(indices.iterate(function (idx, state) {
+    state = asDict(state);
+    var found = toBool(state.get('found'));
+    return ee.Dictionary(ee.Algorithms.If(found, state, ee.Algorithms.If(predicate(idx), ee.Dictionary({ found: true, index: idx }), state)));
+  }, ee.Dictionary({ found: false })));
 };
 
 // 将条件布尔转成 0/1 数字，便于统计
 var b2n = function (b) { return ee.Number(ee.Algorithms.If(b, 1, 0)); };
 
 var computeLifecycle = function (seriesInfo) {
-  var series = ee.List(seriesInfo.get('series'));
-  var size = ee.Number(seriesInfo.get('size'));
-  var enoughData = size.gte(8);
+  var series = ee.List(seriesInfo.get('series'));
+  var size = ee.Number(seriesInfo.get('size'));
+  var enoughData = size.gte(8);
 
-  var fallbackLifecycle = ee.Dictionary({
-    life_cycle_category: '数据不足',
-    life_cycle_desc: '序列不足以判定',
-    life_cycle_subcategory: '',
-    life_cycle_label: '数据不足',
-    start_year: CONFIG.startYear,
-    start_year_detected: null,
-    start_year_is_assumed: toBool(true),
-    stop_year: null,
-    has_stop_detected: toBool(false),
-    intensity_stop_year: CONFIG.latestReferenceYear,
-    mining_duration_years: null,
-    ndvi_series_size: size,
-    ndvi_series_first_year: seriesInfo.get('firstYear'),
-    ndvi_series_last_year: seriesInfo.get('lastYear'),
-    debug_start_fail_reason: 'series too short',
-    debug_stop_fail_reason: 'series too short'
-  });
+  var fallbackLifecycle = ee.Dictionary({
+    life_cycle_category: '数据不足',
+    life_cycle_desc: '序列不足以判定',
+    life_cycle_subcategory: '',
+    life_cycle_label: '数据不足',
+    start_year: CONFIG.startYear,
+    start_year_detected: null,
+    start_year_is_assumed: toBool(true),
+    stop_year: null,
+    has_stop_detected: toBool(false),
+    intensity_stop_year: CONFIG.latestReferenceYear,
+    mining_duration_years: null,
+    ndvi_series_size: size,
+    ndvi_series_first_year: seriesInfo.get('firstYear'),
+    ndvi_series_last_year: seriesInfo.get('lastYear'),
+    debug_start_fail_reason: 'series too short',
+    debug_stop_fail_reason: 'series too short'
+  });
 
-  var buildLifecycle = function () {
-    var rawSeries = series;
-    var cleanedSeries = removeOutliers(rawSeries);
-    var smoothedSeries = smoothSeries(cleanedSeries, 5);
+  var buildLifecycle = function () {
+    var rawSeries = series;
+    var cleanedSeries = removeOutliers(rawSeries);
+    var smoothedSeries = smoothSeries(cleanedSeries, 5);
 
-    var smoothedValues = extractValues(smoothedSeries);
+    var smoothedValues = extractValues(smoothedSeries);
 
-    // ====================== [改进后] 基于 NDVI 变化模式的起/停年份判定 —— 服务器端复刻 + 诊断 ======================
-    var WINDOW_SIZE = 5;
+    // ====================== [改进后] 基于 NDVI 变化模式的起/停年份判定 —— 服务器端复刻 + 诊断 ======================
+    var WINDOW_SIZE = 5;
 
-    var shortSeries = size.lt(ee.Number(WINDOW_SIZE).multiply(2));
-    var globalStd = listStdDev(smoothedValues);
-    var q25 = listQuantile(smoothedValues, 0.25);
-    var q75 = listQuantile(smoothedValues, 0.75);
+    var shortSeries = size.lt(ee.Number(WINDOW_SIZE).multiply(2));
+    var globalStd = listPopStdDev(smoothedValues); // <-- [修复] 使用总体标准差
+    var q25 = listQuantile(smoothedValues, 0.25);
+    var q75 = listQuantile(smoothedValues, 0.75);
+    var globalStdSafe = ee.Number(globalStd).max(0.02);
 
-    // 统计 post 窗内单调变化
-    var countMonotonic = function (vals, directionUp) {
-      vals = ee.List(vals);
-      var n = listLength(vals);
-      return ee.Number(ee.Algorithms.If(n.lt(2), 0, (function () {
-        var idxs = ee.List.sequence(0, n.subtract(2));
-        var upFlag = ee.Number(directionUp ? 1 : 0);
-        var sum = idxs.iterate(function (i, acc) {
-          i = ee.Number(i); acc = ee.Number(acc);
-          var v0 = ee.Number(vals.get(i));
-          var v1 = ee.Number(vals.get(i.add(1)));
-          var condUp = v1.gt(v0);
-          var condDn = v1.lt(v0);
-          var cond = ee.Algorithms.If(upFlag.eq(1), condUp, condDn);
-          return ee.Number(ee.Algorithms.If(cond, acc.add(1), acc));
-        }, ee.Number(0));
-        return ee.Number(sum);
-      })()));
-    };
+    // 统计 post 窗内单调变化
+    var countMonotonic = function (vals, directionUp) {
+      vals = ee.List(vals);
+      var n = listLength(vals);
+      return ee.Number(ee.Algorithms.If(n.lt(2), 0, (function () {
+        var idxs = ee.List.sequence(0, n.subtract(2));
+        var upFlag = ee.Number(directionUp ? 1 : 0);
+        var sum = idxs.iterate(function (i, acc) {
+          i = ee.Number(i); acc = ee.Number(acc);
+          var v0 = ee.Number(vals.get(i));
+          var v1 = ee.Number(vals.get(i.add(1)));
+          var condUp = v1.gt(v0);
+          var condDn = v1.lt(v0);
+          var cond = ee.Algorithms.If(upFlag.eq(1), condUp, condDn);
+          return ee.Number(ee.Algorithms.If(cond, acc.add(1), acc));
+        }, ee.Number(0));
+        return ee.Number(sum);
+      })()));
+    };
 
-    // 条件函数（不短路，用于诊断统计）
-    var condStartC1 = function(preMean, preStd) { return boolAll([ preMean.gt(q75), preStd.lt(globalStd.multiply(0.6)) ]); };
-    var condStartC2 = function(drop)          { return drop.gt(globalStd.multiply(2.0)); };
-    var condStartC3 = function(postVals)      {
-      var downCount = countMonotonic(postVals, false);
-      return ee.Number(downCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
-    };
+    // 条件函数（不短路，用于诊断统计）
+    var condStartC1 = function(preMean, preStd) { return boolAll([ preMean.gte(q75), preStd.lte(globalStdSafe.multiply(0.6)) ]); };
+    var condStartC2 = function(drop)          { return drop.gte(globalStdSafe.multiply(2.0)); };
+    var condStartC3 = function(postVals)      {
+      var downCount = countMonotonic(postVals, false);
+      return ee.Number(downCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
+    };
 
-    var condStopC1  = function(preMean)       { return preMean.lt(q25); };
-    var condStopC2  = function(rise)          { return rise.gt(globalStd.multiply(3.0)); };
-    var condStopC3  = function(postVals)      {
-      var upCount = countMonotonic(postVals, true);
-      return ee.Number(upCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
-    };
+    var condStopC1  = function(preMean)       { return preMean.lte(q25); };
+    var condStopC2  = function(rise)          { return rise.gte(globalStdSafe.multiply(3.0)); };
+    var condStopC3  = function(postVals)      {
+      var upCount = countMonotonic(postVals, true);
+      return ee.Number(upCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
+    };
 
-    // 判定函数（严格按你给的顺序“依次满足所有条件”）
-    var passStartByUser = function (idx) {
-      idx = ee.Number(idx);
-      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
-      var pre = ee.List(win.get('pre'));
-      var post = ee.List(win.get('post'));
-      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-      return ee.Algorithms.If(okLen, (function () {
-        var preVals = extractValues(pre), postVals = extractValues(post);
-        var preMean = listMean(preVals);
-        var preStd  = listStdDev(preVals);
-        var drop    = preMean.subtract(listMean(postVals));
-        var c1 = condStartC1(preMean, preStd);
-        var c2 = ee.Algorithms.If(c1, condStartC2(drop), false);
-        var c3 = ee.Algorithms.If(c2, condStartC3(postVals), false);
-        return c3; // 只有全链路为真才 True
-      })(), false);
-    };
+    // 判定函数（严格按你给的顺序“依次满足所有条件”）
+    var passStartByUser = function (idx) {
+      idx = ee.Number(idx);
+      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
+      var pre = ee.List(win.get('pre'));
+      var post = ee.List(win.get('post'));
+      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+      return ee.Algorithms.If(okLen, (function () {
+        var preVals = extractValues(pre), postVals = extractValues(post);
+        var preMean = listMean(preVals);
+        var preStd  = listPopStdDev(preVals); // <-- [修复] 使用总体标准差
+        var drop    = preMean.subtract(listMean(postVals));
+        var c1 = condStartC1(preMean, preStd);
+        var c2 = ee.Algorithms.If(c1, condStartC2(drop), false);
+        var c3 = ee.Algorithms.If(c2, condStartC3(postVals), false);
+        return c3; // 只有全链路为真才 True
+      })(), false);
+    };
 
-    var passStopByUser = function (idx) {
-      idx = ee.Number(idx);
-      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
-      var pre = ee.List(win.get('pre'));
-      var post = ee.List(win.get('post'));
-      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-      return ee.Algorithms.If(okLen, (function () {
-        var preVals = extractValues(pre), postVals = extractValues(post);
-        var preMean = listMean(preVals);
-        var rise    = listMean(postVals).subtract(preMean);
-        var c1 = condStopC1(preMean);
-        var c2 = ee.Algorithms.If(c1, condStopC2(rise), false);
-        var c3 = ee.Algorithms.If(c2, condStopC3(postVals), false);
-        return c3;
-      })(), false);
-    };
+    var passStopByUser = function (idx) {
+      idx = ee.Number(idx);
+      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
+      var pre = ee.List(win.get('pre'));
+      var post = ee.List(win.get('post'));
+      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+      return ee.Algorithms.If(okLen, (function () {
+        var preVals = extractValues(pre), postVals = extractValues(post);
+        var preMean = listMean(preVals);
+        var rise    = listMean(postVals).subtract(preMean);
+        var c1 = condStopC1(preMean);
+        var c2 = ee.Algorithms.If(c1, condStopC2(rise), false);
+        var c3 = ee.Algorithms.If(c2, condStopC3(postVals), false);
+        return c3;
+      })(), false);
+    };
 
-    var candidateEnd = size.subtract(WINDOW_SIZE).subtract(1);
-    var candidateStart = ee.Number(WINDOW_SIZE);
-    var candidateIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(candidateStart), ee.List.sequence(candidateStart, candidateEnd), ee.List([])));
+    var candidateEnd = size.subtract(WINDOW_SIZE).subtract(1);
+    var candidateStart = ee.Number(WINDOW_SIZE);
+    var candidateIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(candidateStart), ee.List.sequence(candidateStart, candidateEnd), ee.List([])));
 
-    // 先找起始
-    var startResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(candidateIndices, passStartByUser), ee.Dictionary({found: false})));
-    var startFound = toBool(startResult.get('found'));
-    var startIndex = ee.Number(ee.Algorithms.If(startFound, startResult.get('index'), -1));
-    var startYearDetected = ee.Algorithms.If(startFound, asDict(series.get(startIndex)).get('year'), null);
-    var startYearUsed = ee.Number(ee.Algorithms.If(startFound, startYearDetected, CONFIG.startYear));
-    var startAssumed  = boolNot(startFound);
+    // 先找起始
+    var startResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(candidateIndices, passStartByUser), ee.Dictionary({found: false})));
+    var startFound = toBool(startResult.get('found'));
+    var startIndex = ee.Number(ee.Algorithms.If(startFound, startResult.get('index'), -1));
+    var startYearDetected = ee.Algorithms.If(startFound, asDict(series.get(startIndex)).get('year'), null);
+    var startYearUsed = ee.Number(ee.Algorithms.If(startFound, startYearDetected, CONFIG.startYear));
+    var startAssumed  = boolNot(startFound);
 
-    // 再找停止
-    var stopSearchStart = ee.Number(ee.Algorithms.If(startFound, startIndex.add(1), WINDOW_SIZE));
-    var stopIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(stopSearchStart), ee.List.sequence(stopSearchStart, candidateEnd), ee.List([])));
-    var stopResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(stopIndices, passStopByUser), ee.Dictionary({found: false})));
-    var stopFound = toBool(stopResult.get('found'));
-    var stopIndex = ee.Number(ee.Algorithms.If(stopFound, stopResult.get('index'), -1));
-    var stopYearDetected = ee.Algorithms.If(stopFound, asDict(series.get(stopIndex)).get('year'), null);
-    var stopYearUsed = ee.Number(ee.Algorithms.If(stopFound, stopYearDetected, CONFIG.latestReferenceYear));
+    // 再找停止
+    var stopSearchStart = ee.Number(ee.Algorithms.If(startFound, startIndex.add(1), WINDOW_SIZE));
+    var stopIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(stopSearchStart), ee.List.sequence(stopSearchStart, candidateEnd), ee.List([])));
+    var stopResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(stopIndices, passStopByUser), ee.Dictionary({found: false})));
+    var stopFound = toBool(stopResult.get('found'));
+    var stopIndex = ee.Number(ee.Algorithms.If(stopFound, stopResult.get('index'), -1));
+    var stopYearDetected = ee.Algorithms.If(stopFound, asDict(series.get(stopIndex)).get('year'), null);
+    var stopYearUsed = ee.Number(ee.Algorithms.If(stopFound, stopYearDetected, CONFIG.latestReferenceYear));
 
-    // ---------------- 诊断：统计各条件通过情况，用于定位到底卡在哪一步 ----------------
-    var startDiag = ee.Dictionary(ee.Algorithms.If(startFound, ee.Dictionary({ reason: 'detected' }), (function(){
-      var counts = ee.Dictionary(candidateIndices.iterate(function(i, acc){
-        i = ee.Number(i); acc = asDict(acc);
-        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
-        var pre = ee.List(win.get('pre'));
-        var post= ee.List(win.get('post'));
-        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-        var preVals = extractValues(pre);
-        var postVals= extractValues(post);
-        var preMean = listMean(preVals);
-        var preStd  = listStdDev(preVals);
-        var drop    = preMean.subtract(listMean(postVals));
-        var c1 = ee.Algorithms.If(okLen, condStartC1(preMean, preStd), false);
-        var c2 = ee.Algorithms.If(c1,   condStartC2(drop), false);
-        var c3 = ee.Algorithms.If(c2,   condStartC3(postVals), false);
-        return ee.Dictionary({
-          c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
-          c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
-          c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
-          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
-        });
-      }, ee.Dictionary({})));
-      var c1sum = ee.Number(counts.get('c1', 0));
-      var c2sum = ee.Number(counts.get('c2', 0));
-      var c3sum = ee.Number(counts.get('c3', 0));
-      var oksum = ee.Number(counts.get('ok', 0));
-      var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
-        ee.Algorithms.If(c1sum.eq(0), 'no_pre_high_stable_window',
-        ee.Algorithms.If(c2sum.eq(0), 'no_significant_drop_after_high_stable', 'no_sustained_downward_after_drop'))));
-      return counts.set('reason', reason);
-    })()));
+    // ---------------- 诊断：统计各条件通过情况，用于定位到底卡在哪一步 ----------------
+    var startDiag = ee.Dictionary(ee.Algorithms.If(startFound, ee.Dictionary({ reason: 'detected' }), (function(){
+      var counts = ee.Dictionary(candidateIndices.iterate(function(i, acc){
+        i = ee.Number(i); acc = asDict(acc);
+        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
+        var pre = ee.List(win.get('pre'));
+        var post= ee.List(win.get('post'));
+        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+        var preVals = extractValues(pre);
+        var postVals= extractValues(post);
+        var preMean = listMean(preVals);
+        var preStd  = listPopStdDev(preVals); // <-- [修复] 使用总体标准差
+        var drop    = preMean.subtract(listMean(postVals));
+        var c1 = ee.Algorithms.If(okLen, condStartC1(preMean, preStd), false);
+        var c2 = ee.Algorithms.If(c1,   condStartC2(drop), false);
+        var c3 = ee.Algorithms.If(c2,   condStartC3(postVals), false);
+        return ee.Dictionary({
+          c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
+          c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
+          c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
+          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
+        });
+      }, ee.Dictionary({})));
+      var c1sum = ee.Number(counts.get('c1', 0));
+      var c2sum = ee.Number(counts.get('c2', 0));
+      var c3sum = ee.Number(counts.get('c3', 0));
+      var oksum = ee.Number(counts.get('ok', 0));
+      var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
+        ee.Algorithms.If(c1sum.eq(0), 'no_pre_high_stable_window',
+        ee.Algorithms.If(c2sum.eq(0), 'no_significant_drop_after_high_stable', 'no_sustained_downward_after_drop'))));
+      return counts.set('reason', reason);
+    })()));
 
-    var stopDiag = ee.Dictionary(ee.Algorithms.If(stopFound, ee.Dictionary({ reason: 'detected' }), (function(){
-      var counts = ee.Dictionary(stopIndices.iterate(function(i, acc){
-        i = ee.Number(i); acc = asDict(acc);
-        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
-        var pre = ee.List(win.get('pre'));
-        var post= ee.List(win.get('post'));
-        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-        var preVals = extractValues(pre);
-        var postVals= extractValues(post);
-        var preMean = listMean(preVals);
-        var rise    = listMean(postVals).subtract(preMean);
-        var c1 = ee.Algorithms.If(okLen, condStopC1(preMean), false);
-        var c2 = ee.Algorithms.If(c1,   condStopC2(rise), false);
-        var c3 = ee.Algorithms.If(c2,   condStopC3(postVals), false);
-        return ee.Dictionary({
-          c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
-          c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
-          c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
-          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
-        });
-      }, ee.Dictionary({})));
-      var c1sum = ee.Number(counts.get('c1', 0));
-      var c2sum = ee.Number(counts.get('c2', 0));
-      var c3sum = ee.Number(counts.get('c3', 0));
-      var oksum = ee.Number(counts.get('ok', 0));
-      var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
-        ee.Algorithms.If(c1sum.eq(0), 'no_pre_low_window',
-        ee.Algorithms.If(c2sum.eq(0), 'no_significant_rise_after_low', 'no_sustained_upward_after_rise'))));
-      return counts.set('reason', reason);
-    })()));
+    var stopDiag = ee.Dictionary(ee.Algorithms.If(stopFound, ee.Dictionary({ reason: 'detected' }), (function(){
+      var counts = ee.Dictionary(stopIndices.iterate(function(i, acc){
+        i = ee.Number(i); acc = asDict(acc);
+        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
+        var pre = ee.List(win.get('pre'));
+        var post= ee.List(win.get('post'));
+        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+        var preVals = extractValues(pre);
+        var postVals= extractValues(post);
+        var preMean = listMean(preVals);
+        var rise    = listMean(postVals).subtract(preMean);
+        var c1 = ee.Algorithms.If(okLen, condStopC1(preMean), false);
+        var c2 = ee.Algorithms.If(c1,   condStopC2(rise), false);
+        var c3 = ee.Algorithms.If(c2,   condStopC3(postVals), false);
+        return ee.Dictionary({
+          c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
+          c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
+          c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
+          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
+        });
+      }, ee.Dictionary({})));
+      var c1sum = ee.Number(counts.get('c1', 0));
+      var c2sum = ee.Number(counts.get('c2', 0));
+      var c3sum = ee.Number(counts.get('c3', 0));
+      var oksum = ee.Number(counts.get('ok', 0));
+      var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
+        ee.Algorithms.If(c1sum.eq(0), 'no_pre_low_window',
+        ee.Algorithms.If(c2sum.eq(0), 'no_significant_rise_after_low', 'no_sustained_upward_after_rise'))));
+      return counts.set('reason', reason);
+    })()));
 
-    // —— 分类与其余指标保持原设计 ——
-    var hasStart = toBool(true);
-    var startNum = startYearUsed;
-    var stopNum = ee.Number(ee.Algorithms.If(stopFound, stopYearDetected, CONFIG.latestReferenceYear));
-    var startBeforeStop = toBool(ee.Algorithms.If(stopFound, startNum.lt(stopNum), true));
-    var stopAfter2000 = toBool(ee.Algorithms.If(stopFound, ee.Number(stopYearDetected).gt(2000), false));
-    var stillActive2023 = boolNot(stopFound);
+    // —— 分类与其余指标保持原设计 ——
+    var hasStart = toBool(true);
+    var startNum = startYearUsed;
+    var stopNum = ee.Number(ee.Algorithms.If(stopFound, stopYearDetected, CONFIG.latestReferenceYear));
+    var startBeforeStop = toBool(ee.Algorithms.If(stopFound, startNum.lt(stopNum), true));
+    var stopAfter2000 = toBool(ee.Algorithms.If(stopFound, ee.Number(stopYearDetected).gt(2000), false));
+    var stillActive2023 = boolNot(stopFound);
 
-    var categoryInfo = ee.Dictionary(ee.Algorithms.If(
-      boolAll([hasStart, stopFound, startNum.lt(2000), stopNum.lt(2000), startNum.lt(stopNum)]),
-      ee.Dictionary({ main: 'A 类', desc: '历史遗留矿区', sub: '' }),
-      ee.Dictionary({
-        main: 'B 类',
-        desc: '本世纪开采矿区',
-        sub: ee.Algorithms.If(boolAll([stopFound, stopAfter2000, startNum.lt(stopNum)]),
-          'B2 开采不活跃矿区（趋势恢复）',
-          ee.Algorithms.If(stillActive2023, 'B1 开采活跃矿区（仍在扰动或未检测到停止）', 'B1 开采活跃矿区（未满足恢复判据）')
-        )
-      })
-    ));
+    var categoryInfo = ee.Dictionary(ee.Algorithms.If(
+      boolAll([hasStart, stopFound, startNum.lt(2000), stopNum.lt(2000), startNum.lt(stopNum)]),
+      ee.Dictionary({ main: 'A 类', desc: '历史遗留矿区', sub: '' }),
+      ee.Dictionary({
+        main: 'B 类',
+        desc: '本世纪开采矿区',
+        sub: ee.Algorithms.If(boolAll([stopFound, stopAfter2000, startNum.lt(stopNum)]),
+          'B2 开采不活跃矿区（趋势恢复）',
+          ee.Algorithms.If(stillActive2023, 'B1 开采活跃矿区（仍在扰动或未检测到停止）', 'B1 开采活跃矿区（未满足恢复判据）')
+        )
+      })
+    ));
 
-    var subString = ee.String(categoryInfo.get('sub'));
-    var lifeLabel = ee.String(categoryInfo.get('main'))
-      .cat(' (').cat(ee.String(categoryInfo.get('desc')))
-      .cat(ee.String(ee.Algorithms.If(subString.length().gt(0), ee.String(' - ').cat(subString), ee.String(''))))
-      .cat(')');
+    var subString = ee.String(categoryInfo.get('sub'));
+    var lifeLabel = ee.String(categoryInfo.get('main'))
+      .cat(' (').cat(ee.String(categoryInfo.get('desc')))
+      .cat(ee.String(ee.Algorithms.If(subString.length().gt(0), ee.String(' - ').cat(subString), ee.String(''))))
+      .cat(')');
 
-    var durationYears = ee.Algorithms.If(startNum.lt(stopYearUsed), ee.Number(stopYearUsed).subtract(startNum), null);
+    var durationYears = ee.Algorithms.If(startNum.lt(stopYearUsed), ee.Number(stopYearUsed).subtract(startNum), null);
 
-    return ee.Dictionary({
-      life_cycle_category: categoryInfo.get('main'),
-      life_cycle_desc: categoryInfo.get('desc'),
-      life_cycle_subcategory: categoryInfo.get('sub'),
-      life_cycle_label: lifeLabel,
-      start_year: startYearUsed,
-      start_year_detected: startYearDetected,
-      start_year_is_assumed: startAssumed,
-      stop_year: stopYearDetected,
-      has_stop_detected: stopFound,
-      intensity_stop_year: stopYearUsed,
-      mining_duration_years: durationYears,
-      ndvi_series_size: size,
-      ndvi_series_first_year: seriesInfo.get('firstYear'),
-      ndvi_series_last_year: seriesInfo.get('lastYear'),
-      // 诊断附加
-      debug_start_fail_reason: startDiag.get('reason'),
-      debug_start_c1_pass_windows: startDiag.get('c1'),
-      debug_start_c2_pass_windows: startDiag.get('c2'),
-      debug_start_c3_pass_windows: startDiag.get('c3'),
-      debug_stop_fail_reason: stopDiag.get('reason'),
-      debug_stop_c1_pass_windows: stopDiag.get('c1'),
-      debug_stop_c2_pass_windows: stopDiag.get('c2'),
-      debug_stop_c3_pass_windows: stopDiag.get('c3')
-    });
-  };
+    return ee.Dictionary({
+      life_cycle_category: categoryInfo.get('main'),
+      life_cycle_desc: categoryInfo.get('desc'),
+      life_cycle_subcategory: categoryInfo.get('sub'),
+      life_cycle_label: lifeLabel,
+      start_year: startYearUsed,
+      start_year_detected: startYearDetected,
+      start_year_is_assumed: startAssumed,
+      stop_year: stopYearDetected,
+      has_stop_detected: stopFound,
+      intensity_stop_year: stopYearUsed,
+      mining_duration_years: durationYears,
+      ndvi_series_size: size,
+      ndvi_series_first_year: seriesInfo.get('firstYear'),
+      ndvi_series_last_year: seriesInfo.get('lastYear'),
+      // 诊断附加
+      debug_start_fail_reason: startDiag.get('reason'),
+      debug_start_c1_pass_windows: startDiag.get('c1'),
+      debug_start_c2_pass_windows: startDiag.get('c2'),
+      debug_start_c3_pass_windows: startDiag.get('c3'),
+      debug_stop_fail_reason: stopDiag.get('reason'),
+      debug_stop_c1_pass_windows: stopDiag.get('c1'),
+      debug_stop_c2_pass_windows: stopDiag.get('c2'),
+      debug_stop_c3_pass_windows: stopDiag.get('c3')
+    });
+  };
 
-  return ee.Dictionary(ee.Algorithms.If(enoughData, buildLifecycle(), fallbackLifecycle));
+  return ee.Dictionary(ee.Algorithms.If(enoughData, buildLifecycle(), fallbackLifecycle));
 };
 
 var safeMetricValue = function (metrics, key) {
-  metrics = asDict(metrics);
-  var valid = dictGetBool(metrics, key + '_valid', false);
-  return ee.Algorithms.If(valid, ee.Number(metrics.get(key)), null);
+  metrics = asDict(metrics);
+  var valid = dictGetBool(metrics, key + '_valid', false);
+  return ee.Algorithms.If(valid, ee.Number(metrics.get(key)), null);
 };
 var computeChangeRate = function (baseMetrics, targetMetrics, key) {
-  baseMetrics = asDict(baseMetrics); targetMetrics = asDict(targetMetrics);
-  var baseValid = dictGetBool(baseMetrics, key + '_valid', false);
-  var targetValid = dictGetBool(targetMetrics, key + '_valid', false);
-  return ee.Algorithms.If(boolAll([baseValid, targetValid]),
-    (function () {
-      var baseValue = ee.Number(baseMetrics.get(key));
-      return ee.Algorithms.If(baseValue.abs().gt(1e-6),
-        ee.Number(targetMetrics.get(key)).subtract(baseValue).divide(baseValue.abs()),
-        null);
-    })(), null);
+  baseMetrics = asDict(baseMetrics); targetMetrics = asDict(targetMetrics);
+  var baseValid = dictGetBool(baseMetrics, key + '_valid', false);
+  var targetValid = dictGetBool(targetMetrics, key + '_valid', false);
+  return ee.Algorithms.If(boolAll([baseValid, targetValid]),
+    (function () {
+      var baseValue = ee.Number(baseMetrics.get(key));
+      return ee.Algorithms.If(baseValue.abs().gt(1e-6),
+        ee.Number(targetMetrics.get(key)).subtract(baseValue).divide(baseValue.abs()),
+        null);
+    })(), null);
 };
 
 var computeIntensityMetrics = function (feature, lifecycle, geom, ring) {
-  var category = ee.String(lifecycle.get('life_cycle_category'));
-  var isB = category.compareTo('B 类').eq(0);
+  var category = ee.String(lifecycle.get('life_cycle_category'));
+  var isB = category.compareTo('B 类').eq(0);
 
-  var fallbackIntensity = ee.Dictionary({
-    intensity_start_year: lifecycle.get('start_year'),
-    intensity_stop_year: lifecycle.get('intensity_stop_year'),
-    intensity_latest_year: CONFIG.latestReferenceYear,
-    intensity_stop_is_fallback: toBool(true),
-    bnnc_start: null, bnnc_stop: null, bnnc_2023: null,
-    bnnc_change_start_stop: null, bnnc_change_start_2023: null,
-    bnec_start: null, bnec_stop: null, bnec_2023: null,
-    bnec_change_start_stop: null, bnec_change_start_2023: null,
-    bnnc_start_image_count: null, bnnc_stop_image_count: null, bnnc_2023_image_count: null
-  });
+  var fallbackIntensity = ee.Dictionary({
+    intensity_start_year: lifecycle.get('start_year'),
+    intensity_stop_year: lifecycle.get('intensity_stop_year'),
+    intensity_latest_year: CONFIG.latestReferenceYear,
+    intensity_stop_is_fallback: toBool(true),
+    bnnc_start: null, bnnc_stop: null, bnnc_2023: null,
+    bnnc_change_start_stop: null, bnnc_change_start_2023: null,
+    bnec_start: null, bnec_stop: null, bnec_2023: null,
+    bnec_change_start_stop: null, bnec_change_start_2023: null,
+    bnnc_start_image_count: null, bnnc_stop_image_count: null, bnnc_2023_image_count: null
+  });
 
-  var buildIntensity = function () {
-    var startYear = ee.Number(lifecycle.get('start_year'));
-    var stopYearUsed = ee.Number(lifecycle.get('intensity_stop_year'));
-    var latestYear = ee.Number(CONFIG.latestReferenceYear);
+  var buildIntensity = function () {
+    var startYear = ee.Number(lifecycle.get('start_year'));
+    var stopYearUsed = ee.Number(lifecycle.get('intensity_stop_year'));
+    var latestYear = ee.Number(CONFIG.latestReferenceYear);
 
-    var aoiSmall = geom.union(ring).buffer(300).simplify(120);
+    var aoiSmall = geom.union(ring).buffer(300).simplify(120);
 
-    var filteredCollections = { s2: s2Collection.filterBounds(aoiSmall), landsat: landsatAll.filterBounds(aoiSmall) };
-    var resolveSatellite = function (year) { return ee.Algorithms.If(ee.Number(year).gte(2015), 'Sentinel-2', 'Landsat'); };
-    var resolveCollection = function (sat) { return ee.ImageCollection(ee.Algorithms.If(ee.String(sat).compareTo('Sentinel-2').eq(0), filteredCollections.s2, filteredCollections.landsat)); };
+    var filteredCollections = { s2: s2Collection.filterBounds(aoiSmall), landsat: landsatAll.filterBounds(aoiSmall) };
+    var resolveSatellite = function (year) { return ee.Algorithms.If(ee.Number(year).gte(2015), 'Sentinel-2', 'Landsat'); };
+    var resolveCollection = function (sat) { return ee.ImageCollection(ee.Algorithms.If(ee.String(sat).compareTo('Sentinel-2').eq(0), filteredCollections.s2, filteredCollections.landsat)); };
 
-    var startSat = resolveSatellite(startYear);
-    var stopSat  = resolveSatellite(stopYearUsed);
-    var latestSat = resolveSatellite(latestYear);
+    var startSat = resolveSatellite(startYear);
+    var stopSat  = resolveSatellite(stopYearUsed);
+    var latestSat = resolveSatellite(latestYear);
 
-    var configs = ee.List([
-      ee.Dictionary({ key: 'start',  year: startYear,    satellite: startSat,  collection: resolveCollection(startSat) }),
-      ee.Dictionary({ key: 'stop',   year: stopYearUsed, satellite: stopSat,   collection: resolveCollection(stopSat) }),
-      ee.Dictionary({ key: 'latest', year: latestYear,   satellite: latestSat, collection: resolveCollection(latestSat) })
-    ]);
+    var configs = ee.List([
+      ee.Dictionary({ key: 'start',  year: startYear,    satellite: startSat,  collection: resolveCollection(startSat) }),
+      ee.Dictionary({ key: 'stop',   year: stopYearUsed, satellite: stopSat,   collection: resolveCollection(stopSat) }),
+      ee.Dictionary({ key: 'latest', year: latestYear,   satellite: latestSat, collection: resolveCollection(latestSat) })
+    ]);
 
-    var aggregated = ee.Dictionary(configs.iterate(function (cfg, acc) {
-      cfg = asDict(cfg); acc = asDict(acc);
-      var yr = ee.Number(cfg.get('year'));
-      var sat = cfg.get('satellite');
-      var coll = ee.ImageCollection(cfg.get('collection'));
-      var startDate = ee.Date.fromYMD(yr.subtract(2), 1, 1), endDate = startDate.advance(5, 'year');
-      var count = coll.filterDate(startDate, endDate).size();
-      var composite = getComposite(yr, sat, coll, aoiSmall);
-      var metrics = calcBNNC_BNEC(composite, sat, geom, ring);
-      return acc.set(cfg.get('key'), ee.Dictionary({ count: count, metrics: metrics, satellite: sat }));
-    }, ee.Dictionary({})));
+    var aggregated = ee.Dictionary(configs.iterate(function (cfg, acc) {
+      cfg = asDict(cfg); acc = asDict(acc);
+      var yr = ee.Number(cfg.get('year'));
+      var sat = cfg.get('satellite');
+      var coll = ee.ImageCollection(cfg.get('collection'));
+      var startDate = ee.Date.fromYMD(yr.subtract(2), 1, 1), endDate = startDate.advance(5, 'year');
+      var count = coll.filterDate(startDate, endDate).size();
+      var composite = getComposite(yr, sat, coll, aoiSmall);
+      var metrics = calcBNNC_BNEC(composite, sat, geom, ring);
+      return acc.set(cfg.get('key'), ee.Dictionary({ count: count, metrics: metrics, satellite: sat }));
+    }, ee.Dictionary({})));
 
-    var startInfo  = asDict(aggregated.get('start'));
-    var stopInfo   = asDict(aggregated.get('stop'));
-    var latestInfo = asDict(aggregated.get('latest'));
+    var startInfo  = asDict(aggregated.get('start'));
+    var stopInfo   = asDict(aggregated.get('stop'));
+    var latestInfo = asDict(aggregated.get('latest'));
 
-    var startMetrics  = asDict(startInfo.get('metrics'));
-    var stopMetrics   = asDict(stopInfo.get('metrics'));
-    var latestMetrics = asDict(latestInfo.get('metrics'));
+    var startMetrics  = asDict(startInfo.get('metrics'));
+    var stopMetrics   = asDict(stopInfo.get('metrics'));
+    var latestMetrics = asDict(latestInfo.get('metrics'));
 
-    var bnncStart  = safeMetricValue(startMetrics,  'bnnc');
-    var bnncStop   = safeMetricValue(stopMetrics,   'bnnc');
-    var bnncLatest = safeMetricValue(latestMetrics, 'bnnc');
-    var bnecStart  = safeMetricValue(startMetrics,  'bnec');
-    var bnecStop   = safeMetricValue(stopMetrics,   'bnec');
-    var bnecLatest = safeMetricValue(latestMetrics, 'bnec');
+    var bnncStart  = safeMetricValue(startMetrics,  'bnnc');
+    var bnncStop   = safeMetricValue(stopMetrics,   'bnnc');
+    var bnncLatest = safeMetricValue(latestMetrics, 'bnnc');
+    var bnecStart  = safeMetricValue(startMetrics,  'bnec');
+    var bnecStop   = safeMetricValue(stopMetrics,   'bnec');
+    var bnecLatest = safeMetricValue(latestMetrics, 'bnec');
 
-    var bnncChangeStop   = computeChangeRate(startMetrics, stopMetrics, 'bnnc');
-    var bnecChangeStop   = computeChangeRate(startMetrics, stopMetrics, 'bnec');
-    var bnncChangeLatest = computeChangeRate(startMetrics, latestMetrics, 'bnnc');
-    var bnecChangeLatest = computeChangeRate(startMetrics, latestMetrics, 'bnec');
+    var bnncChangeStop   = computeChangeRate(startMetrics, stopMetrics, 'bnnc');
+    var bnecChangeStop   = computeChangeRate(startMetrics, stopMetrics, 'bnec');
+    var bnncChangeLatest = computeChangeRate(startMetrics, latestMetrics, 'bnnc');
+    var bnecChangeLatest = computeChangeRate(startMetrics, latestMetrics, 'bnec');
 
-    var stopDataValid = boolOr(dictGetBool(stopMetrics, 'bnnc_valid', false), dictGetBool(stopMetrics, 'bnec_valid', false));
-    var stopUsesFallback = boolNot(stopDataValid);
+    var stopDataValid = boolOr(dictGetBool(stopMetrics, 'bnnc_valid', false), dictGetBool(stopMetrics, 'bnec_valid', false));
+    var stopUsesFallback = boolNot(stopDataValid);
 
-    return ee.Dictionary({
-      intensity_start_year: startYear,
-      intensity_stop_year: stopYearUsed,
-      intensity_latest_year: latestYear,
-      intensity_stop_is_fallback: stopUsesFallback,
-      bnnc_start: bnncStart, bnnc_stop: bnncStop, bnnc_2023: bnncLatest,
-      bnnc_change_start_stop: bnncChangeStop, bnnc_change_start_2023: bnncChangeLatest,
-      bnec_start: bnecStart, bnec_stop: bnecStop, bnec_2023: bnecLatest,
-      bnec_change_start_stop: bnecChangeStop, bnec_change_start_2023: bnecChangeLatest,
-      bnnc_start_image_count: startInfo.get('count'),
-      bnnc_stop_image_count: stopInfo.get('count'),
-      bnnc_2023_image_count: latestInfo.get('count')
-    });
-  };
+    return ee.Dictionary({
+      intensity_start_year: startYear,
+      intensity_stop_year: stopYearUsed,
+      intensity_latest_year: latestYear,
+      intensity_stop_is_fallback: stopUsesFallback,
+      bnnc_start: bnncStart, bnnc_stop: bnncStop, bnnc_2023: bnncLatest,
+      bnnc_change_start_stop: bnncChangeStop, bnnc_change_start_2023: bnncChangeLatest,
+      bnec_start: bnecStart, bnec_stop: bnecStop, bnec_2023: bnecLatest,
+      bnec_change_start_stop: bnecChangeStop, bnec_change_start_2023: bnecChangeLatest,
+      bnnc_start_image_count: startInfo.get('count'),
+      bnnc_stop_image_count: stopInfo.get('count'),
+      bnnc_2023_image_count: latestInfo.get('count')
+    });
+  };
 
-  return ee.Dictionary(ee.Algorithms.If(isB, buildIntensity(), fallbackIntensity));
+  return ee.Dictionary(ee.Algorithms.If(isB, buildIntensity(), fallbackIntensity));
 };
 
 // ----------------------------- 调试与处理 -----------------------------
 var attachDebugProps = function (feat, seriesInfo, lifecycle, intensity) {
-  var fid = ee.Algorithms.If(feat.get('OBJECTID'), feat.get('OBJECTID'), feat.id());
-  return ee.Feature(feat).set({
-    _dbg_fid: fid,
-    _dbg_ndvi_size: seriesInfo.get('size'),
-    _dbg_ndvi_first: seriesInfo.get('firstYear'),
-    _dbg_ndvi_last: seriesInfo.get('lastYear'),
-    _dbg_lc_label: lifecycle.get('life_cycle_label'),
-    _dbg_int_start: intensity.get('intensity_start_year'),
-    _dbg_int_stop: intensity.get('intensity_stop_year'),
-    _dbg_int_latest: intensity.get('intensity_latest_year')
-  });
+  var fid = ee.Algorithms.If(feat.get('OBJECTID'), feat.get('OBJECTID'), feat.id());
+  return ee.Feature(feat).set({
+    _dbg_fid: fid,
+    _dbg_ndvi_size: seriesInfo.get('size'),
+    _dbg_ndvi_first: seriesInfo.get('firstYear'),
+    _dbg_ndvi_last: seriesInfo.get('lastYear'),
+    _dbg_lc_label: lifecycle.get('life_cycle_label'),
+    _dbg_int_start: intensity.get('intensity_start_year'),
+    _dbg_int_stop: intensity.get('intensity_stop_year'),
+    _dbg_int_latest: intensity.get('intensity_latest_year')
+  });
 };
 
 var processMine = function (feature) {
-  feature = ee.Feature(feature);
-  var geom = feature.geometry();
+  feature = ee.Feature(feature);
+  var geom = feature.geometry();
 
-  var seriesInfo = buildNdviSeries(feature);
+  var seriesInfo = buildNdviSeries(feature);
 
-  return ee.Feature(ee.Algorithms.If(
-    ee.Number(seriesInfo.get('size')).gt(0),
-    (function () {
-      var ringOuter = geom.buffer(800);
-      var ringInner = geom.buffer(200);
-      var ring = ringOuter.difference(ringInner, 10);
-      var lifecycle = computeLifecycle(seriesInfo);
-      var intensity = computeIntensityMetrics(feature, lifecycle, geom, ring);
-      var out = feature.set(lifecycle.combine(intensity));
+  return ee.Feature(ee.Algorithms.If(
+    ee.Number(seriesInfo.get('size')).gt(0),
+    (function () {
+      var ringOuter = geom.buffer(800);
+      var ringInner = geom.buffer(200);
+      var ring = ringOuter.difference(ringInner, 10);
+      var lifecycle = computeLifecycle(seriesInfo);
+      var intensity = computeIntensityMetrics(feature, lifecycle, geom, ring);
+      var out = feature.set(lifecycle.combine(intensity));
 
-      // 英文属性回写（不覆盖原字段）
-      var lcLabel = ee.String(lifecycle.get('life_cycle_label'));
-      var startY  = ee.Number(lifecycle.get('start_year'));
-      var stopYDet = lifecycle.get('stop_year');
-      var stopYUsed = ee.Number(lifecycle.get('intensity_stop_year'));
-      var spanY = lifecycle.get('mining_duration_years');
+      // 英文属性回写（不覆盖原字段）
+      var lcLabel = ee.String(lifecycle.get('life_cycle_label'));
+      var startY  = ee.Number(lifecycle.get('start_year'));
+      var stopYDet = lifecycle.get('stop_year');
+      var stopYUsed = ee.Number(lifecycle.get('intensity_stop_year'));
+      var spanY = lifecycle.get('mining_duration_years');
 
-      out = out.set({
-        'lifecycle_class': lcLabel,
-        'start_year_en': startY,
-        'stop_year_en': stopYDet,
-        'stop_year_used_en': stopYUsed,
-        'active_span_years': spanY,
-        'bnnc_start': intensity.get('bnnc_start'),
-        'bnnc_stop': intensity.get('bnnc_stop'),
-        'bnnc_2023': intensity.get('bnnc_2023'),
-        'bnnc_change_start_stop': intensity.get('bnnc_change_start_stop'),
-        'bnnc_change_start_2023': intensity.get('bnnc_change_start_2023'),
-        'bnec_start': intensity.get('bnec_start'),
-        'bnec_stop': intensity.get('bnec_stop'),
-        'bnec_2023': intensity.get('bnec_2023'),
-        'bnec_change_start_stop': intensity.get('bnec_change_start_stop'),
-        'bnec_change_start_2023': intensity.get('bnec_change_start_2023'),
-        // 诊断字段（英文）
-        'debug_start_reason': lifecycle.get('debug_start_fail_reason'),
-        'debug_start_c1_windows': lifecycle.get('debug_start_c1_pass_windows'),
-        'debug_start_c2_windows': lifecycle.get('debug_start_c2_pass_windows'),
-        'debug_start_c3_windows': lifecycle.get('debug_start_c3_pass_windows'),
-        'debug_stop_reason': lifecycle.get('debug_stop_fail_reason'),
-        'debug_stop_c1_windows': lifecycle.get('debug_stop_c1_pass_windows'),
-        'debug_stop_c2_windows': lifecycle.get('debug_stop_c2_pass_windows'),
-        'debug_stop_c3_windows': lifecycle.get('debug_stop_c3_pass_windows')
-      });
+      out = out.set({
+        'lifecycle_class': lcLabel,
+        'start_year_en': startY,
+        'stop_year_en': stopYDet,
+        'stop_year_used_en': stopYUsed,
+        'active_span_years': spanY,
+        'bnnc_start': intensity.get('bnnc_start'),
+        'bnnc_stop': intensity.get('bnnc_stop'),
+        'bnnc_2023': intensity.get('bnnc_2023'),
+        'bnnc_change_start_stop': intensity.get('bnnc_change_start_stop'),
+        'bnnc_change_start_2023': intensity.get('bnnc_change_start_2023'),
+        'bnec_start': intensity.get('bnec_start'),
+        'bnec_stop': intensity.get('bnec_stop'),
+        'bnec_2023': intensity.get('bnec_2023'),
+        'bnec_change_start_stop': intensity.get('bnec_change_start_stop'),
+        'bnec_change_start_2023': intensity.get('bnec_change_start_2023'),
+        // 诊断字段（英文）
+        'debug_start_reason': lifecycle.get('debug_start_fail_reason'),
+        'debug_start_c1_windows': lifecycle.get('debug_start_c1_pass_windows'),
+        'debug_start_c2_windows': lifecycle.get('debug_start_c2_pass_windows'),
+        'debug_start_c3_windows': lifecycle.get('debug_start_c3_pass_windows'),
+        'debug_stop_reason': lifecycle.get('debug_stop_fail_reason'),
+        'debug_stop_c1_windows': lifecycle.get('debug_stop_c1_pass_windows'),
+        'debug_stop_c2_windows': lifecycle.get('debug_stop_c2_pass_windows'),
+        'debug_stop_c3_windows': lifecycle.get('debug_stop_c3_pass_windows')
+      });
 
-      if (DEBUG) { out = attachDebugProps(out, seriesInfo, lifecycle, intensity); }
-      return out;
-    })(),
-    feature.set({ life_cycle_category: '处理失败', life_cycle_desc: '无法为此要素生成有效的NDVI时间序列' })
-  ));
+      if (DEBUG) { out = attachDebugProps(out, seriesInfo, lifecycle, intensity); }
+      return out;
+    })(),
+    feature.set({ life_cycle_category: '处理失败', life_cycle_desc: '无法为此要素生成有效的NDVI时间序列' })
+  ));
 };
 
 // ----------------------------- 执行与导出 (测试模式) -----------------------------
 var workingCollection = ee.FeatureCollection(ee.Algorithms.If(
-  TEST_MODE, mineAreas.randomColumn().sort('random').limit(TEST_SAMPLE_SIZE), mineAreas
+  TEST_MODE, mineAreas.randomColumn().sort('random').limit(TEST_SAMPLE_SIZE), mineAreas
 ));
 
 var processedCollection = workingCollection.map(processMine);
 
 // 预览
 var previewLabel = ee.String('--- 测试运行结果 (')
-  .cat(ee.Number(processedCollection.size()).format('%d'))
-  .cat(TEST_MODE ? '个随机矿区' : '个矿区 (全量)')
-  .cat(' ---');
+  .cat(ee.Number(processedCollection.size()).format('%d'))
+  .cat(TEST_MODE ? '个随机矿区' : '个矿区 (全量)')
+  .cat(' ---');
 print(previewLabel);
 
 if (DEBUG) {
-  var debugPreview = processedCollection.limit(10).select([
-    '_dbg_fid', '_dbg_ndvi_size', '_dbg_ndvi_first', '_dbg_ndvi_last', '_dbg_lc_label',
-    '_dbg_int_start', '_dbg_int_stop', '_dbg_int_latest',
-    'lifecycle_class', 'start_year_en', 'stop_year_en', 'stop_year_used_en', 'active_span_years',
-    'bnnc_start','bnnc_stop','bnnc_2023','bnnc_change_start_stop','bnnc_change_start_2023',
-    'bnec_start','bnec_stop','bnec_2023','bnec_change_start_stop','bnec_change_start_2023',
-    'debug_start_reason','debug_start_c1_windows','debug_start_c2_windows','debug_start_c3_windows',
-    'debug_stop_reason','debug_stop_c1_windows','debug_stop_c2_windows','debug_stop_c3_windows'
-  ]);
-  print('调试预览（前10条）：', debugPreview);
+  var debugPreview = processedCollection.limit(10).select([
+    '_dbg_fid', '_dbg_ndvi_size', '_dbg_ndvi_first', '_dbg_ndvi_last', '_dbg_lc_label',
+    '_dbg_int_start', '_dbg_int_stop', '_dbg_int_latest',
+    'lifecycle_class', 'start_year_en', 'stop_year_en', 'stop_year_used_en', 'active_span_years',
+    'bnnc_start','bnnc_stop','bnnc_2023','bnnc_change_start_stop','bnnc_change_start_2023',
+    'bnec_start','bnec_stop','bnec_2023','bnec_change_start_stop','bnec_change_start_2023',
+    'debug_start_reason','debug_start_c1_windows','debug_start_c2_windows','debug_start_c3_windows',
+    'debug_stop_reason','debug_stop_c1_windows','debug_stop_c2_windows','debug_stop_c3_windows'
+  ]);
+  print('调试预览（前10条）：', debugPreview);
 }
 
 print('处理完成后矿区属性预览 (Computing...):', processedCollection);
 
 // 导出
-var exportDescription = TEST_MODE ? 'Mine_OBJECTID_1_1-2k_Test_5_7' : 'Mine_Analysis_Results_Full';
-var exportAssetId    = TEST_MODE ? 'users/Loki_ChinaMiningResearch/Mine_OBJECTID_1_1-2k_Test_5_7' : CONFIG.outputAsset;
+var exportDescription = TEST_MODE ? 'Mine_OBJECTID_1_1-2k_Test_5_8' : 'Mine_Analysis_Results_Full';
+var exportAssetId    = TEST_MODE ? 'users/Loki_ChinaMiningResearch/Mine_OBJECTID_1_1-2k_Test_5_8' : CONFIG.outputAsset;
 
 Export.table.toAsset({
-  collection: processedCollection,
-  description: exportDescription,
-  assetId: exportAssetId
+  collection: processedCollection,
+  description: exportDescription,
+  assetId: exportAssetId
 });
 
 print('分析脚本已执行。请前往右上角的"Tasks"分页，手动点击"RUN"来启动名为\'' + exportDescription + '\'的汇出任务。');
