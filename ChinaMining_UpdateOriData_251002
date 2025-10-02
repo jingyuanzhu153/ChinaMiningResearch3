@@ -489,38 +489,63 @@ var computeLifecycle = function (seriesInfo) {
       return ee.Number(upCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
     };
 
-    // 判定函数（严格按你给的顺序“依次满足所有条件”）
     var passStartByUser = function (idx) {
       idx = ee.Number(idx);
-      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
-      var pre = ee.List(win.get('pre'));
-      var post = ee.List(win.get('post'));
-      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+      var winSmooth = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
+      var winClean  = sliceWindow(cleanedSeries,  idx, WINDOW_SIZE, WINDOW_SIZE);
+      var preSmooth = ee.List(winSmooth.get('pre'));
+      var postSmooth = ee.List(winSmooth.get('post'));
+      var preClean = ee.List(winClean.get('pre'));
+      var postClean = ee.List(winClean.get('post'));
+      var okLen = boolAll([
+        listLength(preSmooth).gte(WINDOW_SIZE),
+        listLength(postSmooth).gte(WINDOW_SIZE),
+        listLength(preClean).gte(WINDOW_SIZE),
+        listLength(postClean).gte(WINDOW_SIZE)
+      ]);
       return ee.Algorithms.If(okLen, (function () {
-        var preVals = extractValues(pre), postVals = extractValues(post);
-        var preMean = listMean(preVals);
-        var preStd  = listPopStdDev(preVals); // <-- [修复] 使用总体标准差
-        var drop    = preMean.subtract(listMean(postVals));
-        var c1 = condStartC1(preMean, preStd);
-        var c2 = ee.Algorithms.If(c1, condStartC2(drop), false);
-        var c3 = ee.Algorithms.If(c2, condStartC3(postVals), false);
+        var preValsSmooth = extractValues(preSmooth);
+        var postValsSmooth = extractValues(postSmooth);
+        var preValsClean = extractValues(preClean);
+        var postValsClean = extractValues(postClean);
+        var preMeanSmooth = listMean(preValsSmooth);
+        var preStdSmooth  = listStdDev(preValsSmooth);
+        var preMeanClean  = listMean(preValsClean);
+        var postMeanClean = listMean(postValsClean);
+        var dropClean     = preMeanClean.subtract(postMeanClean);
+        var c1 = condStartC1(preMeanSmooth, preStdSmooth);
+        var c2 = ee.Algorithms.If(c1, condStartC2(dropClean), false);
+        var c3 = ee.Algorithms.If(c2, condStartC3(postValsSmooth), false);
         return c3; // 只有全链路为真才 True
       })(), false);
     };
 
     var passStopByUser = function (idx) {
       idx = ee.Number(idx);
-      var win = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
-      var pre = ee.List(win.get('pre'));
-      var post = ee.List(win.get('post'));
-      var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
+      var winSmooth = sliceWindow(smoothedSeries, idx, WINDOW_SIZE, WINDOW_SIZE);
+      var winClean  = sliceWindow(cleanedSeries,  idx, WINDOW_SIZE, WINDOW_SIZE);
+      var preSmooth = ee.List(winSmooth.get('pre'));
+      var postSmooth = ee.List(winSmooth.get('post'));
+      var preClean = ee.List(winClean.get('pre'));
+      var postClean = ee.List(winClean.get('post'));
+      var okLen = boolAll([
+        listLength(preSmooth).gte(WINDOW_SIZE),
+        listLength(postSmooth).gte(WINDOW_SIZE),
+        listLength(preClean).gte(WINDOW_SIZE),
+        listLength(postClean).gte(WINDOW_SIZE)
+      ]);
       return ee.Algorithms.If(okLen, (function () {
-        var preVals = extractValues(pre), postVals = extractValues(post);
-        var preMean = listMean(preVals);
-        var rise    = listMean(postVals).subtract(preMean);
-        var c1 = condStopC1(preMean);
-        var c2 = ee.Algorithms.If(c1, condStopC2(rise), false);
-        var c3 = ee.Algorithms.If(c2, condStopC3(postVals), false);
+        var preValsSmooth = extractValues(preSmooth);
+        var postValsSmooth = extractValues(postSmooth);
+        var preValsClean = extractValues(preClean);
+        var postValsClean = extractValues(postClean);
+        var preMeanSmooth = listMean(preValsSmooth);
+        var preMeanClean  = listMean(preValsClean);
+        var postMeanClean = listMean(postValsClean);
+        var riseClean     = postMeanClean.subtract(preMeanClean);
+        var c1 = condStopC1(preMeanSmooth);
+        var c2 = ee.Algorithms.If(c1, condStopC2(riseClean), false);
+        var c3 = ee.Algorithms.If(c2, condStopC3(postValsSmooth), false);
         return c3;
       })(), false);
     };
@@ -550,64 +575,108 @@ var computeLifecycle = function (seriesInfo) {
     var startDiag = ee.Dictionary(ee.Algorithms.If(startFound, ee.Dictionary({ reason: 'detected' }), (function(){
       var counts = ee.Dictionary(candidateIndices.iterate(function(i, acc){
         i = ee.Number(i); acc = asDict(acc);
-        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
-        var pre = ee.List(win.get('pre'));
-        var post= ee.List(win.get('post'));
-        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-        var preVals = extractValues(pre);
-        var postVals= extractValues(post);
-        var preMean = listMean(preVals);
-        var preStd  = listPopStdDev(preVals); // <-- [修复] 使用总体标准差
-        var drop    = preMean.subtract(listMean(postVals));
-        var c1 = ee.Algorithms.If(okLen, condStartC1(preMean, preStd), false);
-        var c2 = ee.Algorithms.If(c1,   condStartC2(drop), false);
-        var c3 = ee.Algorithms.If(c2,   condStartC3(postVals), false);
+        var winSmooth = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
+        var winClean  = sliceWindow(cleanedSeries,  i, WINDOW_SIZE, WINDOW_SIZE);
+        var preSmooth = ee.List(winSmooth.get('pre'));
+        var postSmooth= ee.List(winSmooth.get('post'));
+        var preClean  = ee.List(winClean.get('pre'));
+        var postClean = ee.List(winClean.get('post'));
+        var okLen = boolAll([
+          listLength(preSmooth).gte(WINDOW_SIZE),
+          listLength(postSmooth).gte(WINDOW_SIZE),
+          listLength(preClean).gte(WINDOW_SIZE),
+          listLength(postClean).gte(WINDOW_SIZE)
+        ]);
+        var preValsSmooth = extractValues(preSmooth);
+        var postValsSmooth= extractValues(postSmooth);
+        var preValsClean  = extractValues(preClean);
+        var postValsClean = extractValues(postClean);
+        var preMeanSmooth = listMean(preValsSmooth);
+        var preStdSmooth  = listStdDev(preValsSmooth);
+        var preMeanClean  = listMean(preValsClean);
+        var postMeanClean = listMean(postValsClean);
+        var dropClean     = preMeanClean.subtract(postMeanClean);
+        var dropSmooth    = preMeanSmooth.subtract(listMean(postValsSmooth));
+        var c1 = ee.Algorithms.If(okLen, condStartC1(preMeanSmooth, preStdSmooth), false);
+        var c2 = ee.Algorithms.If(c1,   condStartC2(dropClean), false);
+        var c3 = ee.Algorithms.If(c2,   condStartC3(postValsSmooth), false);
+        var okLenNum = b2n(okLen);
         return ee.Dictionary({
           c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
           c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
           c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
-          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
+          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3]))),
+          drop_clean_sum: ee.Number(acc.get('drop_clean_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, dropClean, 0))),
+          drop_smooth_sum: ee.Number(acc.get('drop_smooth_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, dropSmooth, 0))),
+          window_count: ee.Number(acc.get('window_count', 0)).add(okLenNum)
         });
       }, ee.Dictionary({})));
       var c1sum = ee.Number(counts.get('c1', 0));
       var c2sum = ee.Number(counts.get('c2', 0));
       var c3sum = ee.Number(counts.get('c3', 0));
       var oksum = ee.Number(counts.get('ok', 0));
+      var windowCount = ee.Number(counts.get('window_count', 0));
+      var dropCleanAvg = ee.Algorithms.If(windowCount.gt(0), ee.Number(counts.get('drop_clean_sum', 0)).divide(windowCount), null);
+      var dropSmoothAvg = ee.Algorithms.If(windowCount.gt(0), ee.Number(counts.get('drop_smooth_sum', 0)).divide(windowCount), null);
       var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
         ee.Algorithms.If(c1sum.eq(0), 'no_pre_high_stable_window',
         ee.Algorithms.If(c2sum.eq(0), 'no_significant_drop_after_high_stable', 'no_sustained_downward_after_drop'))));
-      return counts.set('reason', reason);
+      return counts.set('reason', reason)
+        .set('drop_clean_avg', dropCleanAvg)
+        .set('drop_smooth_avg', dropSmoothAvg);
     })()));
 
     var stopDiag = ee.Dictionary(ee.Algorithms.If(stopFound, ee.Dictionary({ reason: 'detected' }), (function(){
       var counts = ee.Dictionary(stopIndices.iterate(function(i, acc){
         i = ee.Number(i); acc = asDict(acc);
-        var win = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
-        var pre = ee.List(win.get('pre'));
-        var post= ee.List(win.get('post'));
-        var okLen = boolAll([listLength(pre).gte(WINDOW_SIZE), listLength(post).gte(WINDOW_SIZE)]);
-        var preVals = extractValues(pre);
-        var postVals= extractValues(post);
-        var preMean = listMean(preVals);
-        var rise    = listMean(postVals).subtract(preMean);
-        var c1 = ee.Algorithms.If(okLen, condStopC1(preMean), false);
-        var c2 = ee.Algorithms.If(c1,   condStopC2(rise), false);
-        var c3 = ee.Algorithms.If(c2,   condStopC3(postVals), false);
+        var winSmooth = sliceWindow(smoothedSeries, i, WINDOW_SIZE, WINDOW_SIZE);
+        var winClean  = sliceWindow(cleanedSeries,  i, WINDOW_SIZE, WINDOW_SIZE);
+        var preSmooth = ee.List(winSmooth.get('pre'));
+        var postSmooth= ee.List(winSmooth.get('post'));
+        var preClean  = ee.List(winClean.get('pre'));
+        var postClean = ee.List(winClean.get('post'));
+        var okLen = boolAll([
+          listLength(preSmooth).gte(WINDOW_SIZE),
+          listLength(postSmooth).gte(WINDOW_SIZE),
+          listLength(preClean).gte(WINDOW_SIZE),
+          listLength(postClean).gte(WINDOW_SIZE)
+        ]);
+        var preValsSmooth = extractValues(preSmooth);
+        var postValsSmooth= extractValues(postSmooth);
+        var preValsClean  = extractValues(preClean);
+        var postValsClean = extractValues(postClean);
+        var preMeanSmooth = listMean(preValsSmooth);
+        var preMeanClean  = listMean(preValsClean);
+        var postMeanClean = listMean(postValsClean);
+        var riseClean     = postMeanClean.subtract(preMeanClean);
+        var riseSmooth    = listMean(postValsSmooth).subtract(preMeanSmooth);
+        var c1 = ee.Algorithms.If(okLen, condStopC1(preMeanSmooth), false);
+        var c2 = ee.Algorithms.If(c1,   condStopC2(riseClean), false);
+        var c3 = ee.Algorithms.If(c2,   condStopC3(postValsSmooth), false);
+        var okLenNum = b2n(okLen);
         return ee.Dictionary({
           c1: ee.Number(acc.get('c1', 0)).add(b2n(c1)),
           c2: ee.Number(acc.get('c2', 0)).add(b2n(c2)),
           c3: ee.Number(acc.get('c3', 0)).add(b2n(c3)),
-          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3])))
+          ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3]))),
+          rise_clean_sum: ee.Number(acc.get('rise_clean_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, riseClean, 0))),
+          rise_smooth_sum: ee.Number(acc.get('rise_smooth_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, riseSmooth, 0))),
+          window_count: ee.Number(acc.get('window_count', 0)).add(okLenNum)
         });
       }, ee.Dictionary({})));
       var c1sum = ee.Number(counts.get('c1', 0));
       var c2sum = ee.Number(counts.get('c2', 0));
       var c3sum = ee.Number(counts.get('c3', 0));
       var oksum = ee.Number(counts.get('ok', 0));
+      var windowCount = ee.Number(counts.get('window_count', 0));
+      var riseCleanAvg = ee.Algorithms.If(windowCount.gt(0), ee.Number(counts.get('rise_clean_sum', 0)).divide(windowCount), null);
+      var riseSmoothAvg = ee.Algorithms.If(windowCount.gt(0), ee.Number(counts.get('rise_smooth_sum', 0)).divide(windowCount), null);
       var reason = ee.String(ee.Algorithms.If(oksum.gt(0), 'detected',
         ee.Algorithms.If(c1sum.eq(0), 'no_pre_low_window',
         ee.Algorithms.If(c2sum.eq(0), 'no_significant_rise_after_low', 'no_sustained_upward_after_rise'))));
-      return counts.set('reason', reason);
+      return counts.set('reason', reason)
+        .set('rise_clean_avg', riseCleanAvg)
+        .set('rise_smooth_avg', riseSmoothAvg);
     })()));
 
     // —— 分类与其余指标保持原设计 ——
@@ -659,10 +728,14 @@ var computeLifecycle = function (seriesInfo) {
       debug_start_c1_pass_windows: startDiag.get('c1'),
       debug_start_c2_pass_windows: startDiag.get('c2'),
       debug_start_c3_pass_windows: startDiag.get('c3'),
+      debug_start_drop_avg_clean: startDiag.get('drop_clean_avg'),
+      debug_start_drop_avg_smooth: startDiag.get('drop_smooth_avg'),
       debug_stop_fail_reason: stopDiag.get('reason'),
       debug_stop_c1_pass_windows: stopDiag.get('c1'),
       debug_stop_c2_pass_windows: stopDiag.get('c2'),
-      debug_stop_c3_pass_windows: stopDiag.get('c3')
+      debug_stop_c3_pass_windows: stopDiag.get('c3'),
+      debug_stop_rise_avg_clean: stopDiag.get('rise_clean_avg'),
+      debug_stop_rise_avg_smooth: stopDiag.get('rise_smooth_avg')
     });
   };
 
