@@ -441,6 +441,7 @@ var computeLifecycle = function (seriesInfo) {
     debug_start_c2_pass_windows: 0,
     debug_start_c3_windows_total: 0,
     debug_start_c3_pass_windows: 0,
+    debug_start_c3_eval_windows_total: 0,
     debug_start_drop_avg_clean: null,
     debug_start_drop_avg_smooth: null,
     debug_stop_fail_reason: 'series too short',
@@ -450,6 +451,7 @@ var computeLifecycle = function (seriesInfo) {
     debug_stop_c2_pass_windows: 0,
     debug_stop_c3_windows_total: 0,
     debug_stop_c3_pass_windows: 0,
+    debug_stop_c3_eval_windows_total: 0,
     debug_stop_rise_avg_clean: null,
     debug_stop_rise_avg_smooth: null
   });
@@ -597,6 +599,7 @@ var computeLifecycle = function (seriesInfo) {
       c2_pass: 0,
       c3_total: 0,
       c3_pass: 0,
+      c3_eval_total: 0,
       ok: 0,
       window_count: 0,
       drop_clean_avg: null,
@@ -628,17 +631,26 @@ var computeLifecycle = function (seriesInfo) {
         var dropSmooth    = preMeanSmooth.subtract(listMean(postValsSmooth));
         var c1 = ee.Algorithms.If(okLen, condStartC1(preMeanSmooth, preStdSmooth), false);
         var c2 = ee.Algorithms.If(c1,   condStartC2(dropClean), false);
-        var c3 = ee.Algorithms.If(c2,   condStartC3(postValsSmooth), false);
+        var canEvalC3 = boolAll([okLen, toBool(c1)]);
+        var c3Evaluated = ee.Algorithms.If(canEvalC3, condStartC3(postValsSmooth), false);
+        var c3 = ee.Algorithms.If(c2,   c3Evaluated, false);
         var okLenNum = b2n(okLen);
         var c1Num = b2n(c1);
         var c2Num = b2n(c2);
+        var c3EvalNum = b2n(canEvalC3);
+        var c3PassNum = b2n(c3);
+        var c3TotalPrev = ee.Number(acc.get('c3_total', 0));
+        var c3EvalTotalPrev = ee.Number(acc.get('c3_eval_total', 0));
+        var c3PassPrev = ee.Number(acc.get('c3_pass', 0));
+        var c3TotalNext = c3TotalPrev.add(c3EvalNum);
         return ee.Dictionary({
           c1_pass: ee.Number(acc.get('c1_pass', 0)).add(c1Num),
           c2_pass: ee.Number(acc.get('c2_pass', 0)).add(c2Num),
-          c3_pass: ee.Number(acc.get('c3_pass', 0)).add(b2n(c3)),
+          c3_pass: c3PassPrev.add(c3PassNum),
           c1_total: ee.Number(acc.get('c1_total', 0)).add(okLenNum),
           c2_total: ee.Number(acc.get('c2_total', 0)).add(c1Num),
-          c3_total: ee.Number(acc.get('c3_total', 0)).add(c2Num),
+          c3_total: c3TotalNext,
+          c3_eval_total: c3EvalTotalPrev.add(c3EvalNum),
           ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3]))),
           drop_clean_sum: ee.Number(acc.get('drop_clean_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, dropClean, 0))),
           drop_smooth_sum: ee.Number(acc.get('drop_smooth_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, dropSmooth, 0))),
@@ -661,6 +673,7 @@ var computeLifecycle = function (seriesInfo) {
         ee.Algorithms.If(c2total.eq(0), 'no_significant_drop_after_high_stable',
         ee.Algorithms.If(c2pass.eq(0), 'no_significant_drop_after_high_stable', 'no_sustained_downward_after_drop'))))));
       return counts.set('reason', reason)
+        .set('c3_eval_total', counts.get('c3_eval_total', 0))
         .set('drop_clean_avg', dropCleanAvg)
         .set('drop_smooth_avg', dropSmoothAvg);
     })()));
@@ -673,6 +686,7 @@ var computeLifecycle = function (seriesInfo) {
       c2_pass: 0,
       c3_total: 0,
       c3_pass: 0,
+      c3_eval_total: 0,
       ok: 0,
       window_count: 0,
       rise_clean_avg: null,
@@ -703,17 +717,26 @@ var computeLifecycle = function (seriesInfo) {
         var riseSmooth    = listMean(postValsSmooth).subtract(preMeanSmooth);
         var c1 = ee.Algorithms.If(okLen, condStopC1(preMeanSmooth), false);
         var c2 = ee.Algorithms.If(c1,   condStopC2(riseClean), false);
-        var c3 = ee.Algorithms.If(c2,   condStopC3(postValsSmooth), false);
+        var canEvalC3 = boolAll([okLen, toBool(c1)]);
+        var c3Evaluated = ee.Algorithms.If(canEvalC3, condStopC3(postValsSmooth), false);
+        var c3 = ee.Algorithms.If(c2,   c3Evaluated, false);
         var okLenNum = b2n(okLen);
         var c1Num = b2n(c1);
         var c2Num = b2n(c2);
+        var c3EvalNum = b2n(canEvalC3);
+        var c3PassNum = b2n(c3);
+        var c3TotalPrev = ee.Number(acc.get('c3_total', 0));
+        var c3EvalTotalPrev = ee.Number(acc.get('c3_eval_total', 0));
+        var c3PassPrev = ee.Number(acc.get('c3_pass', 0));
+        var c3TotalNext = c3TotalPrev.add(c3EvalNum);
         return ee.Dictionary({
           c1_pass: ee.Number(acc.get('c1_pass', 0)).add(c1Num),
           c2_pass: ee.Number(acc.get('c2_pass', 0)).add(c2Num),
-          c3_pass: ee.Number(acc.get('c3_pass', 0)).add(b2n(c3)),
+          c3_pass: c3PassPrev.add(c3PassNum),
           c1_total: ee.Number(acc.get('c1_total', 0)).add(okLenNum),
           c2_total: ee.Number(acc.get('c2_total', 0)).add(c1Num),
-          c3_total: ee.Number(acc.get('c3_total', 0)).add(c2Num),
+          c3_total: c3TotalNext,
+          c3_eval_total: c3EvalTotalPrev.add(c3EvalNum),
           ok: ee.Number(acc.get('ok', 0)).add(b2n(boolAll([c1, c2, c3]))),
           rise_clean_sum: ee.Number(acc.get('rise_clean_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, riseClean, 0))),
           rise_smooth_sum: ee.Number(acc.get('rise_smooth_sum', 0)).add(ee.Number(ee.Algorithms.If(okLen, riseSmooth, 0))),
@@ -736,6 +759,7 @@ var computeLifecycle = function (seriesInfo) {
         ee.Algorithms.If(c2total.eq(0), 'no_significant_rise_after_low',
         ee.Algorithms.If(c2pass.eq(0), 'no_significant_rise_after_low', 'no_sustained_upward_after_rise'))))));
       return counts.set('reason', reason)
+        .set('c3_eval_total', counts.get('c3_eval_total', 0))
         .set('rise_clean_avg', riseCleanAvg)
         .set('rise_smooth_avg', riseSmoothAvg);
     })()));
@@ -792,6 +816,7 @@ var computeLifecycle = function (seriesInfo) {
       debug_start_c2_pass_windows: startDiag.get('c2_pass'),
       debug_start_c3_windows_total: startDiag.get('c3_total'),
       debug_start_c3_pass_windows: startDiag.get('c3_pass'),
+      debug_start_c3_eval_windows_total: startDiag.get('c3_eval_total'),
       debug_start_drop_avg_clean: startDiag.get('drop_clean_avg'),
       debug_start_drop_avg_smooth: startDiag.get('drop_smooth_avg'),
       debug_stop_fail_reason: stopDiag.get('reason'),
@@ -801,6 +826,7 @@ var computeLifecycle = function (seriesInfo) {
       debug_stop_c2_pass_windows: stopDiag.get('c2_pass'),
       debug_stop_c3_windows_total: stopDiag.get('c3_total'),
       debug_stop_c3_pass_windows: stopDiag.get('c3_pass'),
+      debug_stop_c3_eval_windows_total: stopDiag.get('c3_eval_total'),
       debug_stop_rise_avg_clean: stopDiag.get('rise_clean_avg'),
       debug_stop_rise_avg_smooth: stopDiag.get('rise_smooth_avg')
     });
@@ -980,12 +1006,14 @@ var processMine = function (feature) {
         'debug_start_c3_windows': lifecycle.get('debug_start_c3_windows_total'),
         'debug_start_c3_pass_windows': lifecycle.get('debug_start_c3_pass_windows'),
         'debug_stop_reason': lifecycle.get('debug_stop_fail_reason'),
+        'debug_start_c3_eval_windows': lifecycle.get('debug_start_c3_eval_windows_total'),
         'debug_stop_c1_windows': lifecycle.get('debug_stop_c1_windows_total'),
         'debug_stop_c1_pass_windows': lifecycle.get('debug_stop_c1_pass_windows'),
         'debug_stop_c2_windows': lifecycle.get('debug_stop_c2_windows_total'),
         'debug_stop_c2_pass_windows': lifecycle.get('debug_stop_c2_pass_windows'),
         'debug_stop_c3_windows': lifecycle.get('debug_stop_c3_windows_total'),
-        'debug_stop_c3_pass_windows': lifecycle.get('debug_stop_c3_pass_windows')
+        'debug_stop_c3_pass_windows': lifecycle.get('debug_stop_c3_pass_windows'),
+        'debug_stop_c3_eval_windows': lifecycle.get('debug_stop_c3_eval_windows_total'),
       });
 
       if (DEBUG) { out = attachDebugProps(out, seriesInfo, lifecycle, intensity); }
@@ -1017,7 +1045,9 @@ if (DEBUG) {
     'bnnc_start','bnnc_stop','bnnc_2023','bnnc_change_start_stop','bnnc_change_start_2023',
     'bnec_start','bnec_stop','bnec_2023','bnec_change_start_stop','bnec_change_start_2023',
     'debug_start_reason','debug_start_c1_windows','debug_start_c1_pass_windows','debug_start_c2_windows','debug_start_c2_pass_windows','debug_start_c3_windows','debug_start_c3_pass_windows',
-    'debug_stop_reason','debug_stop_c1_windows','debug_stop_c1_pass_windows','debug_stop_c2_windows','debug_stop_c2_pass_windows','debug_stop_c3_windows','debug_stop_c3_pass_windows'
+     'debug_start_c3_eval_windows',
+    'debug_stop_reason','debug_stop_c1_windows','debug_stop_c1_pass_windows','debug_stop_c2_windows','debug_stop_c2_pass_windows','debug_stop_c3_windows','debug_stop_c3_pass_windows',
+    'debug_stop_c3_eval_windows'
   ]);
   print('调试预览（前10条）：', debugPreview);
 }
