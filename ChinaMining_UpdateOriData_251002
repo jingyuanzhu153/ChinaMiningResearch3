@@ -347,11 +347,14 @@ var removeOutliers = function (series) {
     ee.List.sequence(0, length.subtract(1)).iterate(function (idx, acc) {
       acc = ee.List(acc); idx = ee.Number(idx);
       var item = ee.Dictionary(series.get(idx)); var value = ee.Number(item.get('ndvi'));
-      var isOutlier = value.subtract(globalMedian).abs().gt(threshold);
       var left = ee.List(ee.Algorithms.If(idx.gt(0), ee.List([values.get(idx.subtract(1))]), ee.List([])));
       var right = ee.List(ee.Algorithms.If(idx.lt(length.subtract(1)), ee.List([values.get(idx.add(1))]), ee.List([])));
       var neighbors = left.cat(right);
       var neighborMean = ee.Number(ee.Algorithms.If(listLength(neighbors).gt(0), listMean(neighbors), globalMedian));
+      var valueDiff = value.subtract(globalMedian).abs();
+      var neighborDeviation = neighborMean.subtract(globalMedian).abs();
+      var isIsolated = neighborDeviation.lte(threshold);
+      var isOutlier = valueDiff.gt(threshold).and(isIsolated);
       var replacement = neighborMean.multiply(0.7).add(ee.Number(globalMedian).multiply(0.3));
       var newValue = ee.Algorithms.If(isOutlier, replacement, value);
       return acc.add(item.set('ndvi', newValue));
@@ -470,9 +473,15 @@ var computeLifecycle = function (seriesInfo) {
     var globalStd = listPopStdDev(smoothedValues); // <-- [修复] 使用总体标准差
     var q25 = listQuantile(smoothedValues, 0.25);
     var q75 = listQuantile(smoothedValues, 0.75);
+    var iqRange = ee.Number(q75).subtract(q25);
+    var iqRangeSafe = ee.Number(iqRange).max(0.02);
+    var ndviRange = iqRange.abs();
     var globalStdSafe = ee.Number(globalStd).max(0.02);
+    var insufficientRange = ndviRange.lt(0.05);
+
 
     // 统计 post 窗内单调变化
+    var MONO_TOL = 0.01;
     var countMonotonic = function (vals, directionUp) {
       vals = ee.List(vals);
       var n = listLength(vals);
@@ -483,8 +492,8 @@ var computeLifecycle = function (seriesInfo) {
           i = ee.Number(i); acc = ee.Number(acc);
           var v0 = ee.Number(vals.get(i));
           var v1 = ee.Number(vals.get(i.add(1)));
-          var condUp = v1.gt(v0);
-          var condDn = v1.lt(v0);
+          var condUp = v1.gte(v0.subtract(MONO_TOL));
+          var condDn = v1.lte(v0.add(MONO_TOL));
           var cond = ee.Algorithms.If(upFlag.eq(1), condUp, condDn);
           return ee.Number(ee.Algorithms.If(cond, acc.add(1), acc));
         }, ee.Number(0));
@@ -494,14 +503,29 @@ var computeLifecycle = function (seriesInfo) {
 
     // 条件函数（不短路，用于诊断统计）
     var condStartC1 = function(preMean, preStd) { return boolAll([ preMean.gte(q75), preStd.lte(globalStdSafe.multiply(0.6)) ]); };
-    var condStartC2 = function(drop)          { return drop.gte(globalStdSafe.multiply(2.0)); };
+    var buildChangeThreshold = function (preStdClean, postStdClean, globalMultiplier) {
+      preStdClean = ee.Number(preStdClean);
+      postStdClean = ee.Number(postStdClean);
+      var localStd = preStdClean.max(postStdClean).max(0.01);
+      var localTerm = localStd.multiply(2.5);
+      var globalTerm = globalStdSafe.multiply(globalMultiplier);
+      var iqTerm = iqRangeSafe.multiply(0.5);
+      return localTerm.max(globalTerm).max(iqTerm);
+    };
+    var condStartC2 = function(drop, preStdClean, postStdClean) {
+      var threshold = buildChangeThreshold(preStdClean, postStdClean, 1.25);
+      return drop.gte(threshold);
+    };    
     var condStartC3 = function(postVals)      {
       var downCount = countMonotonic(postVals, false);
       return ee.Number(downCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
     };
 
     var condStopC1  = function(preMean)       { return preMean.lte(q25); };
-    var condStopC2  = function(rise)          { return rise.gte(globalStdSafe.multiply(3.0)); };
+    var condStopC2  = function(rise, preStdClean, postStdClean) {
+      var threshold = buildChangeThreshold(preStdClean, postStdClean, 1.25);
+      return rise.gte(threshold);
+    };    
     var condStopC3  = function(postVals)      {
       var upCount = countMonotonic(postVals, true);
       return ee.Number(upCount).gte(ee.Number(WINDOW_SIZE - 1).multiply(0.75));
@@ -529,11 +553,13 @@ var computeLifecycle = function (seriesInfo) {
         var postValsClean = extractValues(postClean);
         var preMeanSmooth = listMean(preValsSmooth);
         var preStdSmooth  = listStdDev(preValsSmooth);
+        var preStdClean   = listStdDev(preValsClean);
         var preMeanClean  = listMean(preValsClean);
         var postMeanClean = listMean(postValsClean);
+        var postStdClean  = listStdDev(postValsClean);
         var dropClean     = preMeanClean.subtract(postMeanClean);
         var c1 = condStartC1(preMeanSmooth, preStdSmooth);
-        var c2 = ee.Algorithms.If(c1, condStartC2(dropClean), false);
+        var c2 = ee.Algorithms.If(c1, condStartC2(dropClean, preStdClean, postStdClean), false);
         var c3 = ee.Algorithms.If(c2, condStartC3(postValsSmooth), false);
         return c3; // 只有全链路为真才 True
       })(), false);
@@ -558,12 +584,14 @@ var computeLifecycle = function (seriesInfo) {
         var postValsSmooth = extractValues(postSmooth);
         var preValsClean = extractValues(preClean);
         var postValsClean = extractValues(postClean);
+        var preStdClean  = listStdDev(preValsClean);
         var preMeanSmooth = listMean(preValsSmooth);
         var preMeanClean  = listMean(preValsClean);
         var postMeanClean = listMean(postValsClean);
+        var postStdClean = listStdDev(postValsClean);
         var riseClean     = postMeanClean.subtract(preMeanClean);
         var c1 = condStopC1(preMeanSmooth);
-        var c2 = ee.Algorithms.If(c1, condStopC2(riseClean), false);
+        var c2 = ee.Algorithms.If(c1, condStopC2(riseClean, preStdClean, postStdClean), false);
         var c3 = ee.Algorithms.If(c2, condStopC3(postValsSmooth), false);
         return c3;
       })(), false);
@@ -572,10 +600,10 @@ var computeLifecycle = function (seriesInfo) {
     var candidateEnd = size.subtract(WINDOW_SIZE).subtract(1);
     var candidateStart = ee.Number(WINDOW_SIZE);
     var candidateIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(candidateStart), ee.List.sequence(candidateStart, candidateEnd), ee.List([])));
-
+    var allowWindowSearch = boolAll([boolNot(shortSeries), boolNot(insufficientRange)]);
+    
     // 先找起始
-    var startResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(candidateIndices, passStartByUser), ee.Dictionary({found: false})));
-    var startFound = toBool(startResult.get('found'));
+    var startResult = ee.Dictionary(ee.Algorithms.If(allowWindowSearch, findIndex(candidateIndices, passStartByUser), ee.Dictionary({found: false})));    var startFound = toBool(startResult.get('found'));
     var startIndex = ee.Number(ee.Algorithms.If(startFound, startResult.get('index'), -1));
     var startYearDetected = ee.Algorithms.If(startFound, asDict(series.get(startIndex)).get('year'), null);
     var startYearUsed = ee.Number(ee.Algorithms.If(startFound, startYearDetected, CONFIG.startYear));
@@ -584,7 +612,7 @@ var computeLifecycle = function (seriesInfo) {
     // 再找停止
     var stopSearchStart = ee.Number(ee.Algorithms.If(startFound, startIndex.add(1), WINDOW_SIZE));
     var stopIndices = ee.List(ee.Algorithms.If(candidateEnd.gte(stopSearchStart), ee.List.sequence(stopSearchStart, candidateEnd), ee.List([])));
-    var stopResult = ee.Dictionary(ee.Algorithms.If(boolNot(shortSeries), findIndex(stopIndices, passStopByUser), ee.Dictionary({found: false})));
+    var stopResult = ee.Dictionary(ee.Algorithms.If(allowWindowSearch, findIndex(stopIndices, passStopByUser), ee.Dictionary({found: false})));
     var stopFound = toBool(stopResult.get('found'));
     var stopIndex = ee.Number(ee.Algorithms.If(stopFound, stopResult.get('index'), -1));
     var stopYearDetected = ee.Algorithms.If(stopFound, asDict(series.get(stopIndex)).get('year'), null);
@@ -602,6 +630,21 @@ var computeLifecycle = function (seriesInfo) {
       c3_eval_total: 0,
       ok: 0,
       window_count: 0,
+      drop_clean_avg: null,
+      drop_smooth_avg: null
+    }), ee.Algorithms.If(insufficientRange, ee.Dictionary({
+      reason: 'insufficient_dynamic_range',
+      c1_total: 0,
+      c1_pass: 0,
+      c2_total: 0,
+      c2_pass: 0,
+      c3_total: 0,
+      c3_pass: 0,
+      c3_eval_total: 0,
+      ok: 0,
+      window_count: 0,
+      drop_clean_sum: 0,
+      drop_smooth_sum: 0,
       drop_clean_avg: null,
       drop_smooth_avg: null
     }), (function(){
@@ -626,11 +669,13 @@ var computeLifecycle = function (seriesInfo) {
         var preMeanSmooth = listMean(preValsSmooth);
         var preStdSmooth  = listStdDev(preValsSmooth);
         var preMeanClean  = listMean(preValsClean);
+        var preStdClean   = listStdDev(preValsClean);
         var postMeanClean = listMean(postValsClean);
+        var postStdClean  = listStdDev(postValsClean);
         var dropClean     = preMeanClean.subtract(postMeanClean);
         var dropSmooth    = preMeanSmooth.subtract(listMean(postValsSmooth));
         var c1 = ee.Algorithms.If(okLen, condStartC1(preMeanSmooth, preStdSmooth), false);
-        var c2 = ee.Algorithms.If(c1,   condStartC2(dropClean), false);
+                var c2 = ee.Algorithms.If(c1,   condStartC2(dropClean, preStdClean, postStdClean), false);
         var canEvalC3 = boolAll([okLen, toBool(c1)]);
         var c3Evaluated = ee.Algorithms.If(canEvalC3, condStartC3(postValsSmooth), false);
         var c3 = ee.Algorithms.If(c2,   c3Evaluated, false);
@@ -676,7 +721,7 @@ var computeLifecycle = function (seriesInfo) {
         .set('c3_eval_total', counts.get('c3_eval_total', 0))
         .set('drop_clean_avg', dropCleanAvg)
         .set('drop_smooth_avg', dropSmoothAvg);
-    })()));
+    })())));
 
     var stopDiag = ee.Dictionary(ee.Algorithms.If(stopFound, ee.Dictionary({
       reason: 'detected',
@@ -689,6 +734,21 @@ var computeLifecycle = function (seriesInfo) {
       c3_eval_total: 0,
       ok: 0,
       window_count: 0,
+      rise_clean_avg: null,
+      rise_smooth_avg: null
+    }), ee.Algorithms.If(insufficientRange, ee.Dictionary({
+      reason: 'insufficient_dynamic_range',
+      c1_total: 0,
+      c1_pass: 0,
+      c2_total: 0,
+      c2_pass: 0,
+      c3_total: 0,
+      c3_pass: 0,
+      c3_eval_total: 0,
+      ok: 0,
+      window_count: 0,
+      rise_clean_sum: 0,
+      rise_smooth_sum: 0,
       rise_clean_avg: null,
       rise_smooth_avg: null
     }), (function(){
@@ -712,11 +772,13 @@ var computeLifecycle = function (seriesInfo) {
         var postValsClean = extractValues(postClean);
         var preMeanSmooth = listMean(preValsSmooth);
         var preMeanClean  = listMean(preValsClean);
+        var preStdClean   = listStdDev(preValsClean);
         var postMeanClean = listMean(postValsClean);
+        var postStdClean  = listStdDev(postValsClean);
         var riseClean     = postMeanClean.subtract(preMeanClean);
         var riseSmooth    = listMean(postValsSmooth).subtract(preMeanSmooth);
         var c1 = ee.Algorithms.If(okLen, condStopC1(preMeanSmooth), false);
-        var c2 = ee.Algorithms.If(c1,   condStopC2(riseClean), false);
+        var c2 = ee.Algorithms.If(c1,   condStopC2(riseClean, preStdClean, postStdClean), false);
         var canEvalC3 = boolAll([okLen, toBool(c1)]);
         var c3Evaluated = ee.Algorithms.If(canEvalC3, condStopC3(postValsSmooth), false);
         var c3 = ee.Algorithms.If(c2,   c3Evaluated, false);
@@ -762,7 +824,7 @@ var computeLifecycle = function (seriesInfo) {
         .set('c3_eval_total', counts.get('c3_eval_total', 0))
         .set('rise_clean_avg', riseCleanAvg)
         .set('rise_smooth_avg', riseSmoothAvg);
-    })()));
+    })())));
 
     // —— 分类与其余指标保持原设计 ——
     var hasStart = toBool(true);
@@ -1013,7 +1075,7 @@ var processMine = function (feature) {
         'debug_stop_c2_pass_windows': lifecycle.get('debug_stop_c2_pass_windows'),
         'debug_stop_c3_windows': lifecycle.get('debug_stop_c3_windows_total'),
         'debug_stop_c3_pass_windows': lifecycle.get('debug_stop_c3_pass_windows'),
-        'debug_stop_c3_eval_windows': lifecycle.get('debug_stop_c3_eval_windows_total'),
+        'debug_stop_c3_eval_windows': lifecycle.get('debug_stop_c3_eval_windows_total')
       });
 
       if (DEBUG) { out = attachDebugProps(out, seriesInfo, lifecycle, intensity); }
@@ -1045,7 +1107,7 @@ if (DEBUG) {
     'bnnc_start','bnnc_stop','bnnc_2023','bnnc_change_start_stop','bnnc_change_start_2023',
     'bnec_start','bnec_stop','bnec_2023','bnec_change_start_stop','bnec_change_start_2023',
     'debug_start_reason','debug_start_c1_windows','debug_start_c1_pass_windows','debug_start_c2_windows','debug_start_c2_pass_windows','debug_start_c3_windows','debug_start_c3_pass_windows',
-     'debug_start_c3_eval_windows',
+    'debug_start_c3_eval_windows',
     'debug_stop_reason','debug_stop_c1_windows','debug_stop_c1_pass_windows','debug_stop_c2_windows','debug_stop_c2_pass_windows','debug_stop_c3_windows','debug_stop_c3_pass_windows',
     'debug_stop_c3_eval_windows'
   ]);
